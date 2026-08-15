@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job-automation-core"
+version = "0.1.0"
+description = "Reusable components for resume and job-application automation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Alvaro de Landaluce" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+pdf = [
+    "pypdf>=5.0"
+]
+dev = [
+    "pytest>=8.0",
+    "build>=1.2"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,9 @@
+crewai
+crewai-tools
+pypdf
+playwright
+pandas
+reportlab
+python-dotenv
+streamlit
+pytest
