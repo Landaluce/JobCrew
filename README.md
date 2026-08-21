@@ -32,6 +32,9 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 # Create reviewable packages (safe default; no browser automation)
 .venv/bin/python crew.py --resume data/resume.pdf --query "backend engineer" --location Remote
 
+# Limit listing pages crawled (defaults: 8 total, 2 per domain)
+.venv/bin/python crew.py --resume data/resume.pdf --query "backend engineer" --location Remote --max-listing-pages 10 --max-pages-per-domain 3
+
 # Add a single job package manually
 .venv/bin/python crew.py --add-package "https://..." --title "Dev" --company "Acme" --email "hr@acme.com"
 
@@ -61,6 +64,8 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 # Run the test suite
 .venv/bin/python -m pytest -q
 ```
+
+**Listing-page crawl**: before opening a browser, each listing page URL is checked with a fast HEAD request. Dead/parked/unreachable pages are skipped and recorded in `output/blacklist.json` so future runs skip them instantly.
 
 ## Email and follow-up setup
 
@@ -106,7 +111,8 @@ History uses defined lifecycle statuses: `draft`, `approved`, `prepared`, `submi
 
 ## Project layout
 
-- `src/job_automation/` — reusable resume, identity, package, and history primitives.
+- `src/job_automation/` — reusable resume, identity, package, history, and listing-selection primitives.
+- `crew.py` — CLI entrypoint: CrewAI agent workflow, approval gate, listing-page crawl with pre-crawl liveness checks and blacklist persistence, Playwright apply flow.
 - `crew.py` — agent workflow, CLI approval gate, and `--add-package` for manual entry.
 - `dashboard.py` — Streamlit review queue, tracking view, and email management.
 - `playwright_sites.py` — conservative site handlers; add an adapter per application system.
