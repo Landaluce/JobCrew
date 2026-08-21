@@ -68,6 +68,31 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 .venv/bin/python -m pytest -q
 ```
 
+## CLI flags reference (crew.py)
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-h`, `--help` | flag | — | Show help and exit |
+| `--resume` | path | `data/resume.pdf` | Resume PDF/TXT/MD path |
+| `--query` | str | `python developer remote` | Job search query |
+| `--location` | str | `Remote` | Target location |
+| `--search` | flag | false | Run CrewAI search, crawl listings, create packages |
+| `--generate-cover JOB_ID` | str | — | Generate cover letter for an approved package |
+| `--add-package URL` | str | — | Manually add a job package from a URL |
+| `--title` | str | `Untitled` | Job title (with `--add-package`) |
+| `--company` | str | `Unknown` | Company name (with `--add-package`) |
+| `--email` | str | `""` | Contact email (with `--add-package`) |
+| `--job-id JOB_ID` | str | — | Apply one specific approved package without prompting |
+| `--playwright` | flag | false | Enable browser automation |
+| `--auto-submit` | flag | false | Allow automatic submit (opt-in only) |
+| `--review` | flag | false | Pause for manual review before submitting |
+| `--skip-review` | flag | false | Auto-approve all draft packages (bypass gate) |
+| `--full-cycle` | flag | false | Search + auto-approve + apply in one command |
+| `--max-applications` | int | `3` | Max approved jobs to apply to |
+| `--max-listing-pages` | int | `8` | Max listing pages to crawl per search |
+| `--max-pages-per-domain` | int | `2` | Max listing pages per domain |
+| `--debug` | flag | false | Extra diagnostics during listing crawl |
+
 **Listing-page crawl**: before opening a browser, each listing page URL is checked with a fast HEAD request. Dead/parked/unreachable pages are skipped and recorded in `output/blacklist.json` so future runs skip them instantly.
 
 ## Email and follow-up setup
