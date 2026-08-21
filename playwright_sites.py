@@ -32,13 +32,7 @@ def pick_handler(url: str) -> ApplicationHandler | None:
     Return a site-specific handler when one exists.
 
     Return None to let crew.py use its generic fallback logic.
+    Future: add real site-specific handlers here (e.g. Greenhouse
+    multi-step forms, Lever custom fields) and return them.
     """
-    normalized_url = url.lower()
-
-    if "greenhouse.io" in normalized_url:
-        return generic_handler
-
-    if "lever.co" in normalized_url:
-        return generic_handler
-
     return None

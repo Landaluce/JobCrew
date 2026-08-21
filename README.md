@@ -24,6 +24,7 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 4. Review and approve packages in the dashboard. Generate a tailored cover letter only after approval, from the **Ready to apply** tab.
 5. Optional Playwright assistance uploads the resume and fills a cover letter. It opens a visible browser and does not submit unless `--auto-submit` is specified.
 6. Application events are stored in `output/application_history.json`; use the dashboard and weekly report to track them.
+7. Email addresses are automatically extracted from job posting pages and Gmail inbox for follow-up automation.
 
 ## Commands
 
@@ -31,8 +32,11 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 # Create reviewable packages (safe default; no browser automation)
 .venv/bin/python crew.py --resume data/resume.pdf --query "backend engineer" --location Remote
 
+# Add a single job package manually
+.venv/bin/python crew.py --add-package "https://..." --title "Dev" --company "Acme" --email "hr@acme.com"
+
 # Review approved packages in a visible browser, without submitting
-.venv/bin/python crew.py --apply --playwright --review
+.venv/bin/python crew.py --apply-existing --playwright --review
 
 # Submit previously generated packages without running a new search
 .venv/bin/python crew.py --apply-existing --playwright --review --auto-submit
@@ -43,13 +47,56 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 # Open the review queue and tracking dashboard
 .venv/bin/streamlit run dashboard.py
 
-# Generate summary reports and list follow-up candidates
+# Generate summary reports
 .venv/bin/python report_weekly.py
-.venv/bin/python monitor.py --after-days 7
+
+# Follow-up automation
+.venv/bin/python monitor.py --after-days 7                    # List follow-up candidates
+.venv/bin/python monitor.py --extract-emails                  # Extract emails from URLs + inbox
+.venv/bin/python monitor.py --extract-emails --inbox-only     # Inbox search only
+.venv/bin/python monitor.py --after-days 7 --send-email      # Auto-send follow-up emails
+.venv/bin/python monitor.py --after-days 7 --notify          # Desktop notification
+.venv/bin/python monitor.py --after-days 7 --dry-run         # Preview without sending
 
 # Run the test suite
 .venv/bin/python -m pytest -q
 ```
+
+## Email and follow-up setup
+
+Add to `.env` for follow-up email automation:
+
+```bash
+# SMTP (for sending)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_app_password
+FROM_EMAIL=your_email@gmail.com
+
+# IMAP (for inbox search)
+IMAP_HOST=imap.gmail.com
+IMAP_PORT=993
+IMAP_USER=your_email@gmail.com
+IMAP_PASS=your_app_password
+```
+
+For Gmail, generate an [app password](https://myaccount.google.com/apppasswords) (required with 2FA).
+
+Emails are automatically extracted from:
+
+- Job posting pages during crawl (regex scan for `email@domain.com`)
+- Gmail inbox search by company name
+
+## Dashboard tabs
+
+| Tab | Shows |
+|-----|-------|
+| **Needs attention** | Failed jobs, follow-ups due, draft packages awaiting review |
+| **Submitted** | Applications marked submitted/applied/successful |
+| **Review queue** | Draft packages to approve/reject |
+| **Ready to apply** | Approved packages for browser automation |
+| **Application tracking** | Full editable history with email column |
 
 ## Data conventions
 
@@ -60,8 +107,9 @@ History uses defined lifecycle statuses: `draft`, `approved`, `prepared`, `submi
 ## Project layout
 
 - `src/job_automation/` — reusable resume, identity, package, and history primitives.
-- `crew.py` — agent workflow and explicit CLI approval gate.
-- `dashboard.py` — Streamlit review queue and editable tracking view.
+- `crew.py` — agent workflow, CLI approval gate, and `--add-package` for manual entry.
+- `dashboard.py` — Streamlit review queue, tracking view, and email management.
 - `playwright_sites.py` — conservative site handlers; add an adapter per application system.
-- `monitor.py` / `report_weekly.py` — follow-up and reporting utilities.
+- `monitor.py` — follow-up checker with email extraction, auto-send, and desktop notifications.
+- `report_weekly.py` — weekly metrics (Markdown + PDF).
 - `tests/` — cache, history, identity, and package tests.

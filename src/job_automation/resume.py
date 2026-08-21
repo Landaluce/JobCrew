@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 import hashlib
 from pathlib import Path
 
 from .models import ResumeProfile
+
+MAX_RESUME_CHARS = 12_000
 
 
 def sha256_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
@@ -44,9 +47,20 @@ def extract_text(path: str | Path) -> str:
     raise ValueError(f"Unsupported resume format: {suffix}")
 
 
+def normalize_whitespace(text: str) -> str:
+    """Collapse spurious single spaces inserted by pypdf between characters."""
+    # Target sequences like "s o f t w a r e" (single chars separated by spaces)
+    # by detecting runs where most tokens are 1-2 chars long
+    text = re.sub(r'(?<!\w)(?:(\w) ){2,}(?=\w)', lambda m: m.group(0).replace(' ', ''), text)
+    return re.sub(r'[ \t]+', ' ', text).strip()
+
+
 def parse_resume(path: str | Path) -> ResumeProfile:
     file_path = Path(path)
-    text = extract_text(file_path)
+    text = normalize_whitespace(extract_text(file_path))
+    if len(text) > MAX_RESUME_CHARS:
+        text = text[:MAX_RESUME_CHARS]
+        print(f"Warning: Resume text truncated to {MAX_RESUME_CHARS} characters for LLM compatibility.")
 
     return ResumeProfile(
         source_file=str(file_path.resolve()),

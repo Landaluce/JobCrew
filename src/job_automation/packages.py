@@ -12,7 +12,9 @@ def save_packages(packages: list[ApplicationPackage | dict[str, Any]], path: str
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = [item.to_dict() if isinstance(item, ApplicationPackage) else item for item in packages]
-    destination.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(destination)
 
 
 def load_packages(path: str | Path) -> list[dict[str, Any]]:
