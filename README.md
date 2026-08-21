@@ -29,6 +29,9 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 ## Commands
 
 ```bash
+# Show all options
+.venv/bin/python crew.py -h
+
 # Create reviewable packages (safe default; no browser automation)
 .venv/bin/python crew.py --resume data/resume.pdf --query "backend engineer" --location Remote
 
