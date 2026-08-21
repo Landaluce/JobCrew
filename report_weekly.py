@@ -40,7 +40,7 @@ def compute_metrics(history):
         if isinstance(details.get("approval_turnaround_hours"), (int, float)):
             turnaround.append(details["approval_turnaround_hours"])
 
-    submitted = sum(1 for e in history if e.get("status") in {"submitted", "applied", "success"})
+    submitted = sum(1 for e in history if e.get("status") in {"submitted", "success"})
     failed = sum(1 for e in history if e.get("status") in {"failed", "error"})
     rate = submitted / max(1, submitted + failed)
 

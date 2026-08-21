@@ -106,7 +106,7 @@ st.caption("Review packages before applying, then track the application funnel i
 history = load_history_rows(str(HISTORY_PATH), modified_at(HISTORY_PATH))
 packages = load_package_rows(str(PACKAGES_PATH), modified_at(PACKAGES_PATH))
 
-submitted = sum(row.get("status") in {"submitted", "applied", "success"} for row in history)
+submitted = sum(row.get("status") in {"submitted", "success"} for row in history)
 pending = sum(package.get("status") == "draft" for package in packages)
 ready_to_apply = sum(package.get("status") == "approved" for package in packages)
 with st.sidebar:
@@ -175,7 +175,7 @@ for event_index, event in enumerate(history):
     reason = None
     if status in {"failed", "error"}:
         reason = "Automation failed — review and retry or complete manually"
-    elif status in {"submitted", "applied", "success"} and when is not None and when <= cutoff:
+    elif status in {"submitted", "success"} and when is not None and when <= cutoff:
         reason = f"Follow up — submitted {follow_up_days}+ days ago"
     if reason:
         seen_job_ids.add(jid)
@@ -190,7 +190,7 @@ for event_index, event in enumerate(history):
 
 submitted_rows: list[dict[str, Any]] = []
 for event in history:
-    if event.get("status") not in {"submitted", "applied", "success"}:
+    if event.get("status") not in {"submitted", "success"}:
         continue
     job = event.get("job", event)
     when = event_time(event)
@@ -275,7 +275,7 @@ with attention_tab:
         st.success("Nothing needs attention right now.")
 
 with submitted_tab:
-    st.caption("Applications marked submitted, applied, or successful. Follow-up status uses the sidebar setting.")
+    st.caption("Applications marked submitted or successful. Follow-up status uses the sidebar setting.")
     if submitted_rows:
         st.dataframe(
             pd.DataFrame(submitted_rows),

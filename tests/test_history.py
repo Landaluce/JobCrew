@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from job_automation.history import ApplicationHistory
+from job_automation.history import ApplicationHistory, VALID_STATUSES
 
 
 def test_history_appends_and_finds_a_record(tmp_path: Path) -> None:
@@ -22,6 +22,23 @@ def test_history_recovers_from_invalid_json(tmp_path: Path) -> None:
 def test_history_rejects_unknown_status(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unsupported"):
         ApplicationHistory(tmp_path / "history.json").append({"status": "teleported"})
+
+
+def test_history_rejects_legacy_applied_status(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unsupported"):
+        ApplicationHistory(tmp_path / "history.json").append({"status": "applied"})
+
+
+def test_history_normalizes_legacy_applied_on_read(tmp_path: Path) -> None:
+    """Legacy 'applied' status in stored JSON is normalized to 'submitted'."""
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps([{"status": "applied", "job": {"title": "Engineer"}}]), encoding="utf-8")
+    records = ApplicationHistory(path).records()
+    assert records[0]["status"] == "submitted"
+
+
+def test_applied_not_in_valid_statuses() -> None:
+    assert "applied" not in VALID_STATUSES
 
 
 def test_history_writes_valid_json_atomically(tmp_path: Path) -> None:

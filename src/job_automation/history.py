@@ -9,8 +9,15 @@ from .models import ApplicationRecord
 VALID_STATUSES = frozenset({
     "draft", "approved", "rejected", "prepared", "submitted", "follow_up",
     "interview", "offer", "withdrawn", "failed", "skipped_invalid_url",
-    "approved_not_submitted", "applied", "success", "error",
+    "approved_not_submitted", "success", "error",
 })
+
+
+def _normalize_status(status: str) -> str:
+    """Map legacy statuses to current canonical values."""
+    if status == "applied":
+        return "submitted"
+    return status
 
 
 class ApplicationHistory:
@@ -30,6 +37,9 @@ class ApplicationHistory:
         if not isinstance(payload, list):
             raise ValueError(f"History file must contain a JSON list: {self.path}")
 
+        for record in payload:
+            if isinstance(record, dict) and "status" in record:
+                record["status"] = _normalize_status(record["status"])
         return payload
 
     def append(self, record: ApplicationRecord | dict[str, Any]) -> None:

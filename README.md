@@ -71,7 +71,7 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 ## CLI flags reference (crew.py)
 
 | Flag | Type | Default | Description |
-|------|------|---------|-------------|
+| ------ | ------ | --------- | ------------- |
 | `-h`, `--help` | flag | — | Show help and exit |
 | `--resume` | path | `data/resume.pdf` | Resume PDF/TXT/MD path |
 | `--query` | str | `python developer remote` | Job search query |
@@ -124,9 +124,9 @@ Emails are automatically extracted from:
 ## Dashboard tabs
 
 | Tab | Shows |
-|-----|-------|
+| ----- | ------- |
 | **Needs attention** | Failed jobs, follow-ups due, draft packages awaiting review |
-| **Submitted** | Applications marked submitted/applied/successful |
+| **Submitted** | Applications marked submitted or successful |
 | **Review queue** | Draft packages to approve/reject |
 | **Ready to apply** | Approved packages for browser automation |
 | **Application tracking** | Full editable history with email column |

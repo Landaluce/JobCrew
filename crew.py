@@ -180,7 +180,6 @@ def was_already_applied(job: dict[str, Any]) -> bool:
 
     final_statuses = {
         "submitted",
-        "applied",
         "success",
     }
 

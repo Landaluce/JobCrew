@@ -202,7 +202,7 @@ def main() -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=args.after_days)
     due = []
     for event in ApplicationHistory(Path(args.history)).records():
-        if event.get("status") not in {"submitted", "applied", "success"}:
+        if event.get("status") not in {"submitted", "success"}:
             continue
         timestamp = event.get("timestamp", event.get("created_at", ""))
         try:
