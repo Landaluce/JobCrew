@@ -5,16 +5,66 @@ import shlex
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
 import pandas as pd
 import streamlit as st
 
 from job_automation import ApplicationHistory, job_id
 from job_automation.history import VALID_STATUSES
 from job_automation.packages import load_packages, save_packages
+
+
+def load_config() -> dict[str, Any]:
+    """Load configuration from config.yaml and config.local.yaml."""
+    config = {}
+    config_path = Path("config.yaml")
+    local_config_path = Path("config.local.yaml")
+    
+    if config_path.exists():
+        with open(config_path) as f:
+            config = yaml.safe_load(f) or {}
+    
+    if local_config_path.exists():
+        with open(local_config_path) as f:
+            local_config = yaml.safe_load(f) or {}
+            # Deep merge
+            for key, value in local_config.items():
+                if key in config and isinstance(config[key], dict) and isinstance(value, dict):
+                    config[key].update(value)
+                else:
+                    config[key] = value
+    
+    return config
+
+
+CONFIG = load_config()
+
+# Status color mapping
+STATUS_COLORS = {
+    "draft": "#6c757d",
+    "approved": "#198754",
+    "prepared": "#0d6efd",
+    "submitted": "#0d6efd",
+    "success": "#198754",
+    "rejected": "#dc3545",
+    "failed": "#dc3545",
+    "error": "#dc3545",
+    "interview": "#6f42c1",
+    "offer": "#198754",
+    "withdrawn": "#6c757d",
+    "skipped_invalid_url": "#6c757d",
+    "approved_not_submitted": "#0d6efd",
+}
+
+
+def status_badge(status: str) -> str:
+    """Return HTML for a colored status badge."""
+    color = STATUS_COLORS.get(status, "#6c757d")
+    return f'<span style="background-color: {color}; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 500;">{status.upper()}</span>'
 
 
 HISTORY_PATH = Path("output/application_history.json")
@@ -45,6 +95,29 @@ def event_time(event: dict[str, Any]) -> datetime | None:
         return None
 
 
+def run_project_command_streaming(arguments: list[str], log_container) -> tuple[bool, str]:
+    """Run a command and stream output to a container in real-time."""
+    process = subprocess.Popen(
+        [sys.executable, *arguments],
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    
+    output_lines = []
+    with log_container:
+        log_placeholder = st.empty()
+        for line in iter(process.stdout.readline, ''):
+            output_lines.append(line)
+            log_placeholder.code("".join(output_lines[-50:]), language="bash")
+        process.stdout.close()
+        process.wait()
+    
+    return process.returncode == 0, "".join(output_lines)
+
+
 def run_project_command(arguments: list[str]) -> tuple[bool, str]:
     """Run a supported JobCrew command from the dashboard, with captured output."""
     completed = subprocess.run(
@@ -71,6 +144,58 @@ def _last_lines(text: str, n: int = 30) -> str:
     return "\n".join(["… (truncated)", *lines[-n:]])
 
 
+def confirm_dialog(message: str, key: str) -> bool:
+    """Render a confirmation dialog."""
+    if f"confirm_{key}" not in st.session_state:
+        st.session_state[f"confirm_{key}"] = False
+    
+    if not st.session_state[f"confirm_{key}"]:
+        if st.button(f"⚠️ {message}", key=f"confirm_btn_{key}", type="secondary"):
+            st.session_state[f"confirm_{key}"] = True
+            st.rerun()
+        return False
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ Confirm", key=f"confirm_yes_{key}", type="primary"):
+                st.session_state[f"confirm_{key}"] = False
+                return True
+        with col2:
+            if st.button("❌ Cancel", key=f"confirm_no_{key}", type="secondary"):
+                st.session_state[f"confirm_{key}"] = False
+                st.rerun()
+        return False
+
+
+def inject_keyboard_shortcuts():
+    """Inject JavaScript for keyboard shortcuts using iframe."""
+    st.components.v1.iframe("about:blank", height=0)
+    st.markdown("""
+    <script>
+    document.addEventListener('keydown', function(e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+            return;
+        }
+        if (e.key === 'r' && !e.ctrlKey && !e.metaKey) {
+            window.location.reload();
+        }
+        if (e.key === 'a' && !e.ctrlKey && !e.metaKey) {
+            const approveBtn = document.querySelector('button[key^="approve-"]:not(:disabled)');
+            if (approveBtn) approveBtn.click();
+        }
+        if (e.key === 'j' && !e.ctrlKey && !e.metaKey) {
+            const nextRow = document.querySelector('tr[data-selected] + tr');
+            if (nextRow) nextRow.click();
+        }
+        if (e.key === 'k' && !e.ctrlKey && !e.metaKey) {
+            const prevRow = document.querySelector('tr[data-selected]');
+            if (prevRow && prevRow.previousElementSibling) prevRow.previousElementSibling.click();
+        }
+    });
+    </script>
+    """, unsafe_allow_html=True)
+
+
 def render_package_editor(package: dict[str, Any], form_key: str) -> None:
     with st.form(form_key):
         status = st.selectbox(
@@ -79,7 +204,7 @@ def render_package_editor(package: dict[str, Any], form_key: str) -> None:
             index=["draft", "approved", "rejected"].index(package.get("status", "draft"))
             if package.get("status") in {"draft", "approved", "rejected"} else 0,
         )
-        email = st.text_input("Contact email (for follow-up)", package.get("job", {}).get("email", ""))
+        email = st.text_input("Contact email", package.get("job", {}).get("email", ""))
         cover_letter = st.text_area("Tailored cover letter", package.get("cover_letter", ""), height=240)
         answers_json = st.text_area("Suggested answers (JSON)", json.dumps(package.get("answers", {}), indent=2), height=140)
         notes = st.text_area("Reviewer notes", package.get("notes", ""))
@@ -100,8 +225,22 @@ def render_package_editor(package: dict[str, Any], form_key: str) -> None:
 
 
 st.set_page_config(page_title="Job application workspace", page_icon=":material/work:", layout="wide")
+
+# Inject keyboard shortcuts
+inject_keyboard_shortcuts()
+
+# Initialize session state for auto-refresh
+if "auto_refresh" not in st.session_state:
+    st.session_state.auto_refresh = CONFIG.get("dashboard", {}).get("auto_refresh", False)
+if "refresh_interval" not in st.session_state:
+    st.session_state.refresh_interval = CONFIG.get("dashboard", {}).get("refresh_interval", 30)
+
 st.title("Job application workspace")
 st.caption("Review packages before applying, then track the application funnel in one place.")
+
+# Auto-refresh: use a fragment with a timer (manual refresh for now, can be enhanced)
+if st.session_state.auto_refresh:
+    st.warning("Auto-refresh enabled — use the refresh button or press 'r' to reload.")
 
 history = load_history_rows(str(HISTORY_PATH), modified_at(HISTORY_PATH))
 packages = load_package_rows(str(PACKAGES_PATH), modified_at(PACKAGES_PATH))
@@ -110,32 +249,38 @@ submitted = sum(row.get("status") in {"submitted", "success"} for row in history
 pending = sum(package.get("status") == "draft" for package in packages)
 ready_to_apply = sum(package.get("status") == "approved" for package in packages)
 with st.sidebar:
-    follow_up_days = st.number_input("Follow up after (days)", min_value=1, max_value=90, value=7)
+    st.subheader("Settings")
+    st.session_state.auto_refresh = st.checkbox("Auto-refresh", value=st.session_state.auto_refresh, help="Automatically refresh the dashboard")
+    if st.session_state.auto_refresh:
+        st.session_state.refresh_interval = st.slider("Refresh interval (seconds)", 10, 300, st.session_state.refresh_interval, 10)
     st.divider()
     st.subheader("Run JobCrew")
     with st.form("new-search", border=False):
-        search_query = st.text_input("Job search query", value="python developer remote")
-        search_location = st.text_input("Location", value="Remote")
-        run_search = st.form_submit_button("Create a new review queue", icon=":material/search:")
+        search_query = st.text_input("Job search query", value=CONFIG.get("search", {}).get("query", "python developer remote"), help="Search query for job search (e.g., 'python developer remote')")
+        search_location = st.text_input("Location", value=CONFIG.get("search", {}).get("location", "Remote"), help="Target location for job search")
+        run_search = st.form_submit_button("Create a new review queue", icon=":material/search:", help="Search for jobs and create review packages")
     if run_search:
+        log_container = st.container()
+        with log_container:
+            st.info("🔄 Starting job search...", icon=":material/hourglass_empty:")
         status_text = st.empty()
         status_text.info("Loading resume...")
-        success, output = run_project_command(["crew.py", "--search", "--query", search_query, "--location", search_location])
+        success, output = run_project_command_streaming(["crew.py", "--search", "--query", search_query, "--location", search_location], log_container)
         if success:
             status_text.success("New review queue created.")
         else:
             status_text.error("Job search failed.")
-        with st.expander("Command output"):
+        with st.expander("Command output", expanded=not success):
             st.code(_last_lines(output or "No command output"))
         if success:
             load_package_rows.clear()
             st.rerun()
     with st.form("add-package-form", border=False):
-        add_url = st.text_input("Job URL", placeholder="https://...")
-        add_title = st.text_input("Job title", value="Untitled")
-        add_company = st.text_input("Company", value="Unknown")
-        add_email = st.text_input("Contact email", placeholder="hr@company.com")
-        add_package = st.form_submit_button("Add package", icon=":material/add:")
+        add_url = st.text_input("Job URL", placeholder="https://...", help="Direct URL to the job posting")
+        add_title = st.text_input("Job title", value="Untitled", help="Job title")
+        add_company = st.text_input("Company", value="Unknown", help="Company name")
+        add_email = st.text_input("Contact email", placeholder="hr@company.com", help="Contact email")
+        add_package = st.form_submit_button("Add package", icon=":material/add:", help="Add a single job package from a URL")
     if add_package and add_url:
         success, output = run_project_command([
             "crew.py", "--add-package", add_url, "--title", add_title,
@@ -146,37 +291,22 @@ with st.sidebar:
             load_package_rows.clear()
             st.rerun()
     st.divider()
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Extract emails", icon=":material/mail:", use_container_width=True):
-            with st.spinner("Extracting emails..."):
-                success, output = run_project_command(["monitor.py", "--extract-emails"])
-            (st.success if success else st.error)(output or "Email extraction finished.")
-    with col2:
-        if st.button("Send follow-ups", icon=":material/send:", use_container_width=True):
-            with st.spinner("Sending follow-ups..."):
-                success, output = run_project_command(["monitor.py", "--after-days", str(follow_up_days), "--send-email", "--notify"])
-            (st.success if success else st.error)(output or "Follow-ups sent.")
-    if st.button("Generate weekly report", icon=":material/description:", use_container_width=True):
+    if st.button("Generate weekly report", icon=":material/description:", use_container_width=True, help="Generate a weekly metrics report"):
         with st.spinner("Generating weekly report…"):
             success, output = run_project_command(["report_weekly.py"])
         (st.success if success else st.error)(output or "Weekly report command finished.")
 
 attention_rows: list[dict[str, Any]] = []
-cutoff = datetime.now(timezone.utc) - timedelta(days=follow_up_days)
 seen_job_ids: set[str] = set()
 for event_index, event in enumerate(history):
     job = event.get("job", event)
     status = event.get("status", "")
-    when = event_time(event)
     jid = job_id(job)
     if jid in seen_job_ids:
         continue
     reason = None
     if status in {"failed", "error"}:
         reason = "Automation failed — review and retry or complete manually"
-    elif status in {"submitted", "success"} and when is not None and when <= cutoff:
-        reason = f"Follow up — submitted {follow_up_days}+ days ago"
     if reason:
         seen_job_ids.add(jid)
         attention_rows.append({
@@ -202,7 +332,6 @@ for event in history:
         "job_id": job_id(job),
         "submitted_at": event.get("timestamp", event.get("created_at", "")),
         "days_since_submission": age_days,
-        "follow_up": "Due" if when and when <= cutoff else "Not due",
         "url": job.get("url", ""),
     })
 
@@ -213,21 +342,34 @@ with st.container(horizontal=True):
     st.metric("Ready to apply", ready_to_apply, border=True)
     st.metric("History events", len(history), border=True)
 
+# Status legend
+st.caption("Status legend: " + " | ".join([
+    f'<span style="background-color: {color}; color: white; padding: 1px 6px; border-radius: 8px; font-size: 0.7rem;">{status}</span>'
+    for status, color in STATUS_COLORS.items() if status in {"draft", "approved", "submitted", "success", "rejected", "failed"}
+]), unsafe_allow_html=True)
+
 attention_tab, submitted_tab, review_tab, ready_tab, tracking_tab = st.tabs(
     ["Needs attention", "Submitted", "Review queue", "Ready to apply", "Application tracking"]
 )
 
 with attention_tab:
-    st.caption("Includes failed automation, submitted applications due for follow-up, and draft packages awaiting review.")
+    st.caption("Includes failed automation and draft packages awaiting review.")
     if attention_rows:
+        # Add status badges to dataframe
+        df_attention = pd.DataFrame(attention_rows)[["reason", "status", "company", "title", "email", "job_id", "url", "timestamp"]]
         st.dataframe(
-            pd.DataFrame(attention_rows)[["reason", "status", "company", "title", "email", "job_id", "url", "timestamp"]],
+            df_attention,
             hide_index=True,
             column_config={
                 "url": st.column_config.LinkColumn("Job listing"),
                 "job_id": st.column_config.TextColumn("Job ID"),
+                "status": st.column_config.TextColumn("Status", help="Current application status"),
             },
         )
+        # Show status badges below
+        for row in attention_rows:
+            st.markdown(f"{row['company']} — {row['title']}: {status_badge(row['status'])}", unsafe_allow_html=True)
+        
         selected_attention = st.selectbox(
             "Edit an attention item",
             range(len(attention_rows)),
@@ -257,7 +399,7 @@ with attention_tab:
                 load_history_rows.clear()
                 st.rerun()
             job_url = item.get("url", "")
-            if job_url and st.button("Block URL", key="attention-block-history", icon=":material/block:"):
+            if job_url and confirm_dialog(f"Block domain {job_url}? This will reject the application.", "block_attention"):
                 from urllib.parse import urlparse as _urlparse
                 domain = _urlparse(job_url).netloc.lower()
                 try:
@@ -275,10 +417,11 @@ with attention_tab:
         st.success("Nothing needs attention right now.")
 
 with submitted_tab:
-    st.caption("Applications marked submitted or successful. Follow-up status uses the sidebar setting.")
+    st.caption("Applications marked submitted or successful. Days since submission is computed from the submission timestamp.")
     if submitted_rows:
+        df_submitted = pd.DataFrame(submitted_rows)
         st.dataframe(
-            pd.DataFrame(submitted_rows),
+            df_submitted,
             hide_index=True,
             column_config={
                 "url": st.column_config.LinkColumn("Job listing"),
@@ -286,6 +429,9 @@ with submitted_tab:
                 "job_id": st.column_config.TextColumn("Job ID"),
             },
         )
+        # Show status badges
+        for row in submitted_rows:
+            st.markdown(f"{row['company']} — {row['title']}: {status_badge('submitted')} — {row['days_since_submission']} days since submission", unsafe_allow_html=True)
     else:
         st.info("No submitted applications have been recorded yet.")
 
@@ -296,30 +442,47 @@ with review_tab:
     elif not review_packages:
         st.success("All application packages have been reviewed.")
     else:
+        # Show status summary
+        st.caption(f"Showing {len(review_packages)} draft packages. Press 'a' to approve, 'r' to reject.")
         for idx, package in enumerate(review_packages):
             job = package["job"]
             with st.container(border=True):
-                st.subheader(f"{job.get('title', 'Untitled')} at {job.get('company', 'Unknown')}")
+                st.markdown(f"### {job.get('title', 'Untitled')} at {job.get('company', 'Unknown')} {status_badge(package.get('status', 'draft'))}", unsafe_allow_html=True)
                 st.caption(f"{job.get('location', 'Location not specified')} · fit score: {job.get('score', 'n/a')} · ID: `{package['job_id']}`")
                 if job.get("url"):
                     st.link_button("Open job listing", job["url"], icon=":material/open_in_new:")
                 st.write(job.get("rationale", "No rationale was saved."))
+                
+                # Cover letter editor
+                cover_letter = st.text_area(
+                    "Cover letter (editable)",
+                    value=package.get("cover_letter", ""),
+                    height=200,
+                    key=f"cover_letter_review_{idx}",
+                    help="Edit the cover letter before approving",
+                )
+                if cover_letter != package.get("cover_letter", ""):
+                    package["cover_letter"] = cover_letter
+                    save_packages(packages, PACKAGES_PATH)
+                    load_package_rows.clear()
+                    st.rerun()
+                
                 col1, col2, col3 = st.columns([1, 1, 4])
                 with col1:
-                    if st.button("Approve", key=f"approve-{idx}", type="primary", icon=":material/check:"):
+                    if st.button("✅ Approve", key=f"approve-{idx}", type="primary", help="Approve this package for application"):
                         package["status"] = "approved"
                         save_packages(packages, PACKAGES_PATH)
                         load_package_rows.clear()
                         st.rerun()
                 with col2:
-                    if st.button("Reject", key=f"reject-{idx}", icon=":material/close:"):
+                    if confirm_dialog(f"Reject '{job.get('title', 'Untitled')}'?", f"reject_review_{idx}"):
                         package["status"] = "rejected"
                         save_packages(packages, PACKAGES_PATH)
                         load_package_rows.clear()
                         st.rerun()
                 with col3:
                     if not package.get("cover_letter"):
-                        if st.button("Generate cover letter", key=f"gen-cover-{idx}", icon=":material/auto_awesome:"):
+                        if st.button("Generate cover letter", key=f"gen-cover-{idx}", icon=":material/auto_awesome:", help="Generate a tailored cover letter"):
                             package["status"] = "approved"
                             save_packages(packages, PACKAGES_PATH)
                             with st.spinner("Generating a letter for this job…"):
@@ -335,8 +498,9 @@ with review_tab:
                         auto_submit = st.checkbox(
                             "Auto-submit",
                             key=f"auto-submit-review-{idx}",
+                            help="Automatically submit the application after review",
                         )
-                        if st.button("Open in browser", key=f"open-review-{idx}", icon=":material/open_in_new:"):
+                        if st.button("Open in browser", key=f"open-review-{idx}", icon=":material/open_in_new:", help="Open application in browser for manual review"):
                             arguments = [
                                 "crew.py", "--apply-existing", "--job-id", package["job_id"],
                                 "--playwright", "--review",
@@ -355,8 +519,9 @@ with ready_tab:
         batch_auto_submit = st.checkbox(
             "Auto-submit for batch apply",
             key="batch-auto-submit",
+            help="Automatically submit all applications after review",
         )
-        if st.button("Apply all approved", type="primary", icon=":material/play_arrow:", key="batch-apply"):
+        if st.button("Apply all approved", type="primary", icon=":material/play_arrow:", key="batch-apply", help="Apply to all approved packages"):
             arguments = [
                 "crew.py", "--apply-existing", "--playwright", "--review",
                 "--max-applications", str(len(approved_packages)),
@@ -369,7 +534,7 @@ with ready_tab:
         for idx, package in enumerate(approved_packages):
             job = package["job"]
             with st.container(border=True):
-                st.subheader(f"{job.get('title', 'Untitled')} at {job.get('company', 'Unknown')}")
+                st.markdown(f"### {job.get('title', 'Untitled')} at {job.get('company', 'Unknown')} {status_badge(package.get('status', 'approved'))}", unsafe_allow_html=True)
                 st.caption(f"ID: `{package['job_id']}`")
                 if job.get("url"):
                     st.link_button("Open job listing", job["url"], icon=":material/open_in_new:")
@@ -382,9 +547,10 @@ with ready_tab:
                     auto_submit = st.checkbox(
                         "Auto-submit",
                         key=f"ready-auto-submit-{idx}",
+                        help="Automatically submit after review",
                     )
                 with col2:
-                    if st.button("Open in browser", type="primary", key=f"ready-apply-{idx}", icon=":material/open_in_new:"):
+                    if st.button("Open in browser", type="primary", key=f"ready-apply-{idx}", icon=":material/open_in_new:", help="Open application in browser for manual review"):
                         arguments = [
                             "crew.py", "--apply-existing", "--job-id", package["job_id"],
                             "--playwright", "--review",
@@ -394,7 +560,7 @@ with ready_tab:
                         success, message = launch_in_terminal(arguments)
                         (st.success if success else st.error)(message)
                 with col3:
-                    if st.button("Submitted", key=f"ready-submitted-{idx}", icon=":material/check_circle:", help="Mark as manually submitted"):
+                    if st.button("✅ Submitted", key=f"ready-submitted-{idx}", icon=":material/check_circle:", help="Mark as manually submitted"):
                         event = {
                             "job": job,
                             "status": "submitted",
@@ -408,13 +574,13 @@ with ready_tab:
                         load_history_rows.clear()
                         st.rerun()
                 with col4:
-                    if st.button("Reject", key=f"ready-reject-{idx}", icon=":material/close:"):
+                    if confirm_dialog(f"Reject '{job.get('title', 'Untitled')}'?", f"reject_ready_{idx}"):
                         package["status"] = "rejected"
                         save_packages(packages, PACKAGES_PATH)
                         load_package_rows.clear()
                         st.rerun()
                 with col5:
-                    if job.get("url") and st.button("Block URL", key=f"ready-block-{idx}", icon=":material/block:"):
+                    if job.get("url") and confirm_dialog(f"Block domain for '{job.get('title', 'Untitled')}'?", f"block_ready_{idx}"):
                         from urllib.parse import urlparse as _urlparse
                         domain = _urlparse(job["url"]).netloc.lower()
                         try:
@@ -453,12 +619,16 @@ with tracking_tab:
             hide_index=True,
             disabled=["timestamp", "company", "title", "job_id", "url"],
             column_config={
-                "status": st.column_config.SelectboxColumn("Status", options=sorted(VALID_STATUSES)),
+                "status": st.column_config.SelectboxColumn("Status", options=sorted(VALID_STATUSES), help="Application status"),
                 "url": st.column_config.LinkColumn("Job listing"),
                 "job_id": st.column_config.TextColumn("Job ID"),
             },
         )
-        if st.button("Save tracking changes", icon=":material/save:"):
+        # Show status badges for quick visual scanning
+        st.caption("Status overview:")
+        for _, row in table.iterrows():
+            st.markdown(f"{row['company']} — {row['title']}: {status_badge(row['status'])}", unsafe_allow_html=True)
+        if st.button("Save tracking changes", icon=":material/save:", help="Save all status changes"):
             for index, row in edited.iterrows():
                 history[index]["status"] = row["status"]
                 history[index].setdefault("job", {})["email"] = row["email"]

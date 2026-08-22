@@ -1,0 +1,49 @@
+# JobCrew Configuration
+# Copy this file to config.local.yaml for local overrides (git-ignored)
+
+# Resume settings
+resume:
+  path: "data/resume.pdf"
+
+# Job search defaults
+search:
+  query: "python developer remote"
+  location: "Remote"
+  max_listing_pages: 5
+  max_pages_per_domain: 2
+
+# Application settings
+application:
+  max_applications: 3
+  auto_submit: false
+  review_mode: true
+  skip_review: false
+
+# Playwright settings
+playwright:
+  enabled: false
+  headless: false
+  slow_mo: 250
+  channel: "chrome"
+
+# Ollama/LLM settings
+llm:
+  model: "llama3.2:3b"
+  base_url: "http://localhost:11434"
+  temperature: 0.2
+
+# Dashboard settings
+dashboard:
+  auto_refresh: true
+  refresh_interval: 30
+  follow_up_days: 7
+
+# Output paths
+output:
+  directory: "output"
+  shortlist_json: "output/shortlist.json"
+  packages_json: "output/application_packages.json"
+  history_json: "output/application_history.json"
+  history_csv: "output/application_history.csv"
+  resume_cache: "output/resume_profile.json"
+  blacklist_json: "output/blacklist.json"

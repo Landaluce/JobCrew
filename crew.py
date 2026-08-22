@@ -3,6 +3,9 @@ import json
 import csv
 import argparse
 import re
+import sys
+import time
+import threading
 from urllib.parse import urlparse
 import urllib.request
 import ssl
@@ -10,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew, Process, LLM
@@ -22,11 +26,149 @@ from job_automation.listings import (
     PARKED_DOMAIN_MARKERS,
     add_to_blacklist,
     check_listing_url,
+    domain_of,
     is_blacklisted,
     load_blacklist,
     select_listing_urls,
 )
 from job_automation.packages import load_packages, save_packages
+
+
+def load_config() -> dict[str, Any]:
+    """Load configuration from config.yaml and config.local.yaml."""
+    config = {}
+    config_path = Path("config.yaml")
+    local_config_path = Path("config.local.yaml")
+    
+    if config_path.exists():
+        with open(config_path) as f:
+            config = yaml.safe_load(f) or {}
+    
+    if local_config_path.exists():
+        with open(local_config_path) as f:
+            local_config = yaml.safe_load(f) or {}
+            # Deep merge
+            for key, value in local_config.items():
+                if key in config and isinstance(config[key], dict) and isinstance(value, dict):
+                    config[key].update(value)
+                else:
+                    config[key] = value
+    
+    return config
+
+
+CONFIG = load_config()
+
+
+class Colors:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    GRAY = "\033[90m"
+
+
+class Spinner:
+    def __init__(self, message: str, verbose: bool = False):
+        self.message = message
+        self.verbose = verbose
+        self._running = False
+        self._thread = None
+        self._chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def start(self):
+        if self.verbose:
+            print(f"{Colors.CYAN}{self.message}{Colors.RESET}")
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._spin)
+        self._thread.daemon = True
+        self._thread.start()
+
+    def _spin(self):
+        i = 0
+        while self._running:
+            sys.stdout.write(f"\r{Colors.CYAN}{self._chars[i % len(self._chars)]} {self.message}{Colors.RESET}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+            i += 1
+
+    def stop(self, success: bool = True, message: str = ""):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=0.5)
+        if self.verbose:
+            return
+        sys.stdout.write("\r" + " " * (len(self.message) + 10) + "\r")
+        sys.stdout.flush()
+        if message:
+            color = Colors.GREEN if success else Colors.RED
+            print(f"{color}{message}{Colors.RESET}")
+
+
+def log_info(message: str, verbose: bool = False):
+    if verbose:
+        print(f"{Colors.BLUE}[INFO] {message}{Colors.RESET}")
+    else:
+        print(f"{Colors.BLUE}{message}{Colors.RESET}")
+
+
+def log_success(message: str, verbose: bool = False):
+    print(f"{Colors.GREEN}{message}{Colors.RESET}")
+
+
+def log_warning(message: str, verbose: bool = False):
+    print(f"{Colors.YELLOW}{message}{Colors.RESET}")
+
+
+def log_error(message: str, verbose: bool = False):
+    print(f"{Colors.RED}{message}{Colors.RESET}", file=sys.stderr)
+
+
+def log_debug(message: str, verbose: bool = False):
+    if verbose:
+        print(f"{Colors.GRAY}[DEBUG] {message}{Colors.RESET}")
+
+
+def get_help_examples():
+    return f"""
+{Colors.BOLD}Examples:{Colors.RESET}
+  {Colors.CYAN}# Search for jobs and create review packages{Colors.RESET}
+  python crew.py --search --resume data/resume.pdf --query "python developer" --location Remote
+
+  {Colors.CYAN}# Full cycle: search + auto-approve + apply (opens browser){Colors.RESET}
+  python crew.py --full-cycle --resume data/resume.pdf --query "python developer" --location Remote
+
+  {Colors.CYAN}# Apply to existing approved packages with browser review{Colors.RESET}
+  python crew.py --apply-existing --playwright --review
+
+  {Colors.CYAN}# Apply without interactive approval (auto-approve all){Colors.RESET}
+  python crew.py --apply-existing --playwright --review --skip-review
+
+  {Colors.CYAN}# Auto-submit applications (opt-in only){Colors.RESET}
+  python crew.py --apply-existing --playwright --review --auto-submit
+
+  {Colors.CYAN}# Generate cover letter for a specific approved package{Colors.RESET}
+  python crew.py --generate-cover JOB_ID
+
+  {Colors.CYAN}# Dry run to preview what would happen{Colors.RESET}
+  python crew.py --search --resume data/resume.pdf --query "python developer" --dry-run
+
+  {Colors.CYAN}# Verbose output for debugging{Colors.RESET}
+  python crew.py --search --resume data/resume.pdf --query "python developer" --verbose
+"""
+
+
+class CustomHelpFormatter(argparse.HelpFormatter):
+    def __init__(self, prog, indent_increment=2, max_help_position=40, width=None):
+        super().__init__(prog, indent_increment, max_help_position, width)
+
+    def format_help(self):
+        help_text = super().format_help()
+        return help_text + get_help_examples()
 
 
 try:
@@ -75,12 +217,19 @@ JOB_URL_PATTERNS = [
     r"simplyhired\.com/search",              # SimplyHired search results
     r"careerbuilder\.com/job/",              # CareerBuilder
     r"monster\.com/job/",                    # Monster
+    # Search result pages (used as fallback when crawl extracts from search pages)
+    r"indeed\.com/jobs\?",                   # Indeed search results
+    r"linkedin\.com/jobs/search",            # LinkedIn job search
+    r"salesforce\.com/jobs/search",          # Salesforce search
+    r"amazon\.jobs/.*search",                # Amazon search
+    r"tesla\.com/jobs/search",               # Tesla search
 ]
 
 # Fallback: keywords in the URL path that suggest a job posting
 JOB_URL_KEYWORDS = [
     "/jobs/view/", "/job/", "/position/", "/opening/",
     "/role/", "/vacancy/", "/requisition/", "/posting/",
+    "/jobs?", "/search", "/results",
 ]
 
 load_dotenv()
@@ -135,6 +284,12 @@ def load_history() -> list[dict[str, Any]]:
     return history_store.records()
 
 
+HISTORY_CSV_FIELDS = [
+    "timestamp", "status", "title", "company", "location",
+    "url", "source", "score", "site", "error",
+]
+
+
 def sync_csv(history: list):
     ensure_output_dir()
     rows = []
@@ -153,11 +308,12 @@ def sync_csv(history: list):
             "site": details.get("site", ""),
             "error": details.get("error", ""),
         })
-    if rows:
-        with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
+    # Always rewrite, including a header-only file when history is empty,
+    # so stale rows never outlive their events.
+    with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=HISTORY_CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def log_event(
@@ -267,10 +423,68 @@ def verify_url_resolves(url: str, timeout: int = 10) -> bool:
         return False
 
 
-def extract_email_from_url(url: str, timeout: int = 10) -> str:
-    """Fetch a page and extract the first email address found."""
-    email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+def extract_email_from_url(url: str, timeout: int = 30) -> str:
+    """Extract email addresses from a job posting URL using Playwright (renders JS) with HTTP fallback."""
+    emails = _extract_emails_playwright(url, timeout)
+    if not emails:
+        emails = _extract_emails_http(url, timeout)
+    if not emails:
+        emails = _extract_emails_obfuscated(url, timeout)
+    return emails[0] if emails else ""
+
+
+def _extract_emails_playwright(url: str, timeout: int) -> list[str]:
+    """Extract emails using Playwright to render JavaScript."""
+    if not PLAYWRIGHT_AVAILABLE:
+        return []
     skip_domains = {"example.com", "sentry.io", "wixpress.com", "w3.org", "schema.org"}
+    emails = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+            
+            # Get full rendered HTML
+            content = page.content()
+            
+            # Check mailto: links
+            mailto_links = page.locator('a[href^="mailto:"]').all()
+            for link in mailto_links:
+                try:
+                    href = link.get_attribute("href", timeout=1000)
+                    if href:
+                        email = href.replace("mailto:", "").split("?")[0]
+                        emails.append(email)
+                except Exception:
+                    pass
+            
+            # Find emails in rendered content
+            email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+            for match in email_pattern.finditer(content):
+                emails.append(match.group(0))
+            
+            browser.close()
+    except Exception:
+        pass
+    
+    # Filter and deduplicate
+    filtered = []
+    seen = set()
+    for email in emails:
+        email_lower = email.lower()
+        domain = email_lower.split("@")[1] if "@" in email_lower else ""
+        if domain and not any(skip in domain for skip in skip_domains) and email_lower not in seen:
+            seen.add(email_lower)
+            filtered.append(email_lower)
+    return filtered
+
+
+def _extract_emails_http(url: str, timeout: int) -> list[str]:
+    """Fallback: extract emails using HTTP request."""
+    skip_domains = {"example.com", "sentry.io", "wixpress.com", "w3.org", "schema.org"}
+    email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    emails = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -279,32 +493,80 @@ def extract_email_from_url(url: str, timeout: int = 10) -> str:
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
         resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
-        content = resp.read(50_000).decode("utf-8", errors="ignore")
+        content = resp.read(100_000).decode("utf-8", errors="ignore")
         for match in email_pattern.finditer(content):
             email = match.group(0).lower()
             domain = email.split("@")[1]
             if not any(skip in domain for skip in skip_domains):
-                return email
+                emails.append(email)
     except Exception:
         pass
-    return ""
+    return list(dict.fromkeys(emails))  # deduplicate
 
 
-def save_packages_from_shortlist(shortlist: list[dict], resume_path: str, resume_hash: str) -> list[dict]:
+def _extract_emails_obfuscated(url: str, timeout: int) -> list[str]:
+    """Find obfuscated emails like 'name at domain dot com'."""
+    skip_domains = {"example.com", "sentry.io", "wixpress.com", "w3.org", "schema.org"}
+    email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    obfuscated_patterns = [
+        r'(\w+)\s+at\s+(\w+)\s+dot\s+(\w+)',
+        r'(\w+)\s*\[at\]\s*(\w+)\s*\[dot\]\s*(\w+)',
+        r'(\w+)\s*\(at\)\s*(\w+)\s*\(dot\)\s*(\w+)',
+    ]
+    emails = []
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
+        resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        content = resp.read(100_000).decode("utf-8", errors="ignore")
+        
+        # Regular emails
+        for match in email_pattern.finditer(content):
+            email = match.group(0).lower()
+            domain = email.split("@")[1]
+            if not any(skip in domain for skip in skip_domains):
+                emails.append(email)
+        
+        # Obfuscated emails
+        for pattern in obfuscated_patterns:
+            for match in re.finditer(pattern, content, re.IGNORECASE):
+                email = f"{match.group(1)}@{match.group(2)}.{match.group(3)}".lower()
+                domain = email.split("@")[1]
+                if not any(skip in domain for skip in skip_domains):
+                    emails.append(email)
+    except Exception:
+        pass
+    return list(dict.fromkeys(emails))
+
+
+def save_packages_from_shortlist(shortlist: list[dict], resume_path: str, resume_hash: str, verbose: bool = False, verify: bool = True) -> list[dict]:
     """Create review packages; cover letters are generated only after approval."""
     valid_jobs = [job for job in shortlist if is_valid_job_url(job.get("url", ""))]
     if len(valid_jobs) < len(shortlist):
-        print(f"Filtered out {len(shortlist) - len(valid_jobs)} jobs with invalid/placeholder URLs.")
-    verified_jobs = [job for job in valid_jobs if verify_url_resolves(job.get("url", ""))]
-    if len(verified_jobs) < len(valid_jobs):
-        print(f"Filtered out {len(valid_jobs) - len(verified_jobs)} jobs that redirect to parked domains.")
+        log_warning(f"Filtered out {len(shortlist) - len(valid_jobs)} jobs with invalid/placeholder URLs.", verbose)
+    if verify:
+        verified_jobs = [job for job in valid_jobs if verify_url_resolves(job.get("url", ""))]
+        if len(verified_jobs) < len(valid_jobs):
+            log_warning(f"Filtered out {len(valid_jobs) - len(verified_jobs)} jobs that redirect to parked domains.", verbose)
+            # Fallback: if HEAD verification filters all valid jobs (common for search result pages
+            # that block HEAD), keep valid jobs so Serper results still become packages.
+            if not verified_jobs and valid_jobs:
+                log_warning("HEAD verification filtered all jobs — keeping valid URLs as packages.", verbose)
+                verified_jobs = valid_jobs
+    else:
+        verified_jobs = valid_jobs
+        log_info("Skipping HEAD verification for search result URLs.", verbose)
     packages = [{
         "job_id": job_id(job), "job": job, "cover_letter": "", "answers": {},
         "resume_path": resume_path, "resume_hash": resume_hash, "status": "draft", "notes": "",
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     } for job in verified_jobs]
     save_packages(packages, PACKAGES_JSON)
-    print(f"Saved {len(packages)} review packages to {PACKAGES_JSON}")
+    log_success(f"Saved {len(packages)} review packages to {PACKAGES_JSON}", verbose)
     return packages
 
 
@@ -331,7 +593,7 @@ Resume: {resume_text}""",
     return parsed.cover_letter
 
 
-def generate_cover_for_saved_package(package_id: str, resume_text: str) -> None:
+def generate_cover_for_saved_package(package_id: str, resume_text: str, verbose: bool = False) -> None:
     packages = load_packages(PACKAGES_JSON)
     package = next((item for item in packages if item.get("job_id") == package_id), None)
     if package is None:
@@ -340,16 +602,17 @@ def generate_cover_for_saved_package(package_id: str, resume_text: str) -> None:
         raise ValueError("Approve a package before generating its cover letter.")
     package["cover_letter"] = generate_cover_letter(package["job"], resume_text, create_llm())
     save_packages(packages, PACKAGES_JSON)
-    print("Cover letter generated and saved.")
+    log_success("Cover letter generated and saved.", verbose)
 
 
 def approval_gate(
     packages_path: str = PACKAGES_JSON,
     max_applications: int | None = None,
     skip_review: bool = False,
+    verbose: bool = False,
 ) -> list[dict]:
     if not os.path.exists(packages_path):
-        print(f"No application packages found at {packages_path}")
+        log_warning(f"No application packages found at {packages_path}", verbose)
         return []
 
     approved = []
@@ -374,30 +637,30 @@ def approval_gate(
         else:
             job = package["job"]
         if not is_valid_job_url(job.get("url", "")):
-            print(f"\n=== SKIPPING PLACEHOLDER URL ===")
-            print(f"{job.get('title')} @ {job.get('company')}")
-            print(f"URL: {job.get('url')}")
+            log_warning(f"\n=== SKIPPING PLACEHOLDER URL ===", verbose)
+            log_warning(f"{job.get('title')} @ {job.get('company')}", verbose)
+            log_warning(f"URL: {job.get('url')}", verbose)
             continue
         if was_already_applied(job):
-            print("\n=== SKIPPING PREVIOUSLY PROCESSED JOB ===")
-            print(f"{job.get('title')} @ {job.get('company')}")
-            print(f"URL: {job.get('url')}")
+            log_warning("\n=== SKIPPING PREVIOUSLY PROCESSED JOB ===", verbose)
+            log_warning(f"{job.get('title')} @ {job.get('company')}", verbose)
+            log_warning(f"URL: {job.get('url')}", verbose)
             continue
 
         if skip_review:
             package["status"] = "approved"
             approved.append(package)
             log_event("approved", job, {"approval_turnaround_hours": 0, "package_id": package["job_id"]})
-            print(f"\n=== AUTO-APPROVED ===")
-            print(f"{job.get('title')} @ {job.get('company')}")
-            print(f"URL: {job.get('url')}")
+            log_success(f"\n=== AUTO-APPROVED ===", verbose)
+            log_success(f"{job.get('title')} @ {job.get('company')}", verbose)
+            log_success(f"URL: {job.get('url')}", verbose)
             continue
 
-        print("\n=== JOB ===")
-        print(f"{job.get('title')} @ {job.get('company')}")
-        print(f"Location: {job.get('location')}")
-        print(f"Score: {job.get('score')}")
-        print(f"URL: {job.get('url')}")
+        log_info("\n=== JOB ===", verbose)
+        log_info(f"{job.get('title')} @ {job.get('company')}", verbose)
+        log_info(f"Location: {job.get('location')}", verbose)
+        log_info(f"Score: {job.get('score')}", verbose)
+        log_info(f"URL: {job.get('url')}", verbose)
         ans = input("Approve this job for application? [y/N]: ").strip().lower()
         if ans == "y":
             package["status"] = "approved"
@@ -573,10 +836,9 @@ def crawl_listing_page(url: str, debug: bool = False) -> list[dict[str, str]]:
 
                 # Domain sanity check: reject URLs from parked/suspicious domains
                 # and cross-domain links that aren't from known job boards
-                href_domain = urlparse(href).netloc.lower()
-                listing_domain = urlparse(url).netloc.lower().lstrip("www.")
-                href_domain_stripped = href_domain.lstrip("www.")
-                is_same_domain = href_domain_stripped == listing_domain or listing_domain in href_domain_stripped or href_domain_stripped in listing_domain
+                href_domain = domain_of(href)
+                listing_domain = domain_of(url)
+                is_same_domain = href_domain == listing_domain or listing_domain in href_domain or href_domain in listing_domain
                 is_known_job_board = any(kb in href_domain for kb in KNOWN_JOB_BOARD_DOMAINS)
                 is_parked = any(marker in href_domain for marker in PARKED_DOMAIN_MARKERS)
                 if is_parked:
@@ -617,12 +879,13 @@ def crawl_listing_page(url: str, debug: bool = False) -> list[dict[str, str]]:
 def crawl_all_listings(
     search_results: list[dict[str, Any]],
     debug: bool = False,
+    verbose: bool = False,
     max_pages: int = MAX_LISTING_PAGES,
     max_per_domain: int = MAX_PAGES_PER_DOMAIN,
 ) -> list[dict[str, Any]]:
     """Crawl listing page URLs from search results and return individual job postings."""
     if not PLAYWRIGHT_AVAILABLE:
-        print("Playwright not available, skipping listing crawl.")
+        log_warning("Playwright not available, skipping listing crawl.", verbose)
         return []
 
     all_jobs: list[dict[str, Any]] = []
@@ -631,7 +894,7 @@ def crawl_all_listings(
     selected = select_listing_urls(search_results, max_pages=max_pages, max_per_domain=max_per_domain)
     total_urls = len({item.get("url", "").strip() for item in search_results if item.get("url", "").strip()})
     skipped_by_caps = total_urls - len(selected)
-    print(f"\n=== CRAWLING {len(selected)} LISTING PAGES ({skipped_by_caps} skipped by caps/domain limits) ===")
+    log_info(f"\n=== CRAWLING {len(selected)} LISTING PAGES ({skipped_by_caps} skipped by caps/domain limits) ===", verbose)
 
     pages_with_results = 0
     pages_empty = 0
@@ -639,13 +902,13 @@ def crawl_all_listings(
     for item in selected:
         listing_url = item.get("url", "")
         if is_blacklisted(BLACKLIST_JSON, listing_url):
-            print(f"\nSkipping blacklisted listing page: {listing_url}")
+            log_warning(f"\nSkipping blacklisted listing page: {listing_url}", verbose)
             pages_skipped += 1
             continue
 
         ok, reason = check_listing_url(listing_url)
         if not ok:
-            print(f"\nSkipping unreachable listing page ({reason}): {listing_url}")
+            log_warning(f"\nSkipping unreachable listing page ({reason}): {listing_url}", verbose)
             add_to_blacklist(BLACKLIST_JSON, [listing_url])
             pages_skipped += 1
             continue
@@ -665,23 +928,23 @@ def crawl_all_listings(
                     "url": job["url"],
                 })
 
-    print(f"\n=== CRAWL COMPLETE: {len(all_jobs)} unique job URLs found ===")
-    print(f"  Pages with results: {pages_with_results}/{len(selected)}")
+    log_info(f"\n=== CRAWL COMPLETE: {len(all_jobs)} unique job URLs found ===", verbose)
+    log_info(f"  Pages with results: {pages_with_results}/{len(selected)}", verbose)
     if pages_skipped:
-        print(f"  Pages skipped (blacklisted/unreachable): {pages_skipped}/{len(selected)}")
+        log_info(f"  Pages skipped (blacklisted/unreachable): {pages_skipped}/{len(selected)}", verbose)
     if pages_empty:
-        print(f"  Pages with no results: {pages_empty}/{len(selected)}")
+        log_info(f"  Pages with no results: {pages_empty}/{len(selected)}", verbose)
         if pages_empty + pages_skipped == len(selected):
-            print("  All pages returned zero job URLs. Possible causes:")
-            print("    - Page failed to render (JS-heavy / anti-bot)")
-            print("    - URL patterns don't match this job board")
-            print("    - Page is a search results page (not a listing page)")
-            print("  Tip: run with --debug to see raw URLs found on each page")
-    print()
+            log_warning("  All pages returned zero job URLs. Possible causes:", verbose)
+            log_warning("    - Page failed to render (JS-heavy / anti-bot)", verbose)
+            log_warning("    - URL patterns don't match this job board", verbose)
+            log_warning("    - Page is a search results page (not a listing page)", verbose)
+            log_warning("  Tip: run with --debug to see raw URLs found on each page", verbose)
+    log_info("", verbose)
 
     # Post-crawl verification: HEAD-request each URL to filter parked domains, extract emails
     if all_jobs:
-        print(f"=== VERIFYING {len(all_jobs)} URLs (HEAD request + email extraction) ===")
+        log_info(f"=== VERIFYING {len(all_jobs)} URLs (HEAD request + email extraction) ===", verbose)
         verified_jobs: list[dict[str, Any]] = []
         rejected = 0
         for job in all_jobs:
@@ -693,14 +956,14 @@ def crawl_all_listings(
             else:
                 rejected += 1
                 if debug:
-                    print(f"  Rejected (unreachable/parked): {job['url']}")
+                    log_debug(f"  Rejected (unreachable/parked): {job['url']}", verbose)
         all_jobs = verified_jobs
-        print(f"  Verified: {len(all_jobs)} | Rejected: {rejected}")
+        log_info(f"  Verified: {len(all_jobs)} | Rejected: {rejected}", verbose)
 
     return all_jobs
 
 
-def apply_with_playwright(job: dict[str, Any], resume_path: str, cover_letter: str, auto_submit: bool = False, review_mode: bool = True):
+def apply_with_playwright(job: dict[str, Any], resume_path: str, cover_letter: str, auto_submit: bool = False, review_mode: bool = True, verbose: bool = False):
     if not PLAYWRIGHT_AVAILABLE:
         raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install")
 
@@ -744,7 +1007,7 @@ def apply_with_playwright(job: dict[str, Any], resume_path: str, cover_letter: s
             page = context.new_page()
             page.bring_to_front()
 
-            print(f"\nOpening application URL:\n{job['url']}\n")
+            log_info(f"\nOpening application URL:\n{job['url']}\n", verbose)
 
             response = page.goto(
                 job["url"],
@@ -754,9 +1017,9 @@ def apply_with_playwright(job: dict[str, Any], resume_path: str, cover_letter: s
 
             page.wait_for_timeout(3_000)
 
-            print(f"Page title: {page.title()}")
-            print(f"Current URL: {page.url}")
-            print(f"HTTP status: {response.status if response else 'unknown'}")
+            log_info(f"Page title: {page.title()}", verbose)
+            log_info(f"Current URL: {page.url}", verbose)
+            log_info(f"HTTP status: {response.status if response else 'unknown'}", verbose)
 
             details["steps"].append("opened_url")
 
@@ -789,7 +1052,7 @@ def apply_with_playwright(job: dict[str, Any], resume_path: str, cover_letter: s
                     browser.close()
                     return {**details, "cancelled": True}
                 elif choice not in {"", "p"}:
-                    print("Unrecognised choice; saving as prepared.")
+                    log_warning("Unrecognised choice; saving as prepared.", verbose)
 
             if auto_submit and manual_status != "submitted":
                 # Never click a generic `button[type=submit]`: job boards often
@@ -835,23 +1098,33 @@ def apply_with_playwright(job: dict[str, Any], resume_path: str, cover_letter: s
             browser.close()
 
         log_event(status, job, details)
+        log_success(f"Application status: {status}", verbose)
         return details
     except Exception as e:
         details["error"] = str(e)
         log_event("failed", job, details)
+        log_error(f"Application failed: {e}", verbose)
         raise
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="CrewAI job search and application assistant",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=CustomHelpFormatter,
     )
 
+    # Get config defaults
+    resume_default = CONFIG.get("resume", {}).get("path", "data/resume.pdf")
+    query_default = CONFIG.get("search", {}).get("query", "python developer remote")
+    location_default = CONFIG.get("search", {}).get("location", "Remote")
+    max_apps_default = CONFIG.get("application", {}).get("max_applications", 3)
+    max_listing_pages_default = CONFIG.get("search", {}).get("max_listing_pages", MAX_LISTING_PAGES)
+    max_pages_per_domain_default = CONFIG.get("search", {}).get("max_pages_per_domain", MAX_PAGES_PER_DOMAIN)
+
     input_group = parser.add_argument_group("Input")
-    input_group.add_argument("--resume", default="data/resume.pdf", help="Path to resume PDF/TXT/MD")
-    input_group.add_argument("--query", default="python developer remote", help="Job search query")
-    input_group.add_argument("--location", default="Remote", help="Target job location")
+    input_group.add_argument("--resume", default=resume_default, help="Path to resume PDF/TXT/MD")
+    input_group.add_argument("--query", default=query_default, help="Job search query")
+    input_group.add_argument("--location", default=location_default, help="Target job location")
 
     run_group = parser.add_argument_group("Run Mode")
     run_group.add_argument("--search", action="store_true", help="Run CrewAI search, crawl listings, and create review packages")
@@ -871,14 +1144,16 @@ def main():
     run_group.add_argument("--review", action="store_true", help="Pause for manual review before submitting")
     run_group.add_argument("--skip-review", action="store_true", help="Auto-approve all draft packages (skip interactive approval gate)")
     run_group.add_argument("--full-cycle", action="store_true", help="Search + auto-approve + apply in one run")
-    run_group.add_argument("--max-applications", type=int, default=3, help="Maximum number of approved jobs to apply to")
+    run_group.add_argument("--max-applications", type=int, default=max_apps_default, help="Maximum number of approved jobs to apply to")
     run_group.add_argument("--debug", action="store_true", help="Show extra diagnostics during listing crawl")
+    run_group.add_argument("--dry-run", action="store_true", help="Preview actions without making changes")
+    run_group.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
     run_group.add_argument(
-        "--max-listing-pages", type=int, default=MAX_LISTING_PAGES,
+        "--max-listing-pages", type=int, default=max_listing_pages_default,
         help="Maximum number of listing pages to crawl per search",
     )
     run_group.add_argument(
-        "--max-pages-per-domain", type=int, default=MAX_PAGES_PER_DOMAIN,
+        "--max-pages-per-domain", type=int, default=max_pages_per_domain_default,
         help="Maximum listing pages crawled per domain",
     )
 
@@ -895,17 +1170,40 @@ def main():
 
     ensure_output_dir()
 
+    # Validate required files early
+    if args.search or args.full_cycle:
+        resume_path = Path(args.resume)
+        if not resume_path.exists():
+            log_error(f"Resume file not found: {resume_path}")
+            log_error("Create a resume file or specify a different path with --resume")
+            raise SystemExit(1)
+
+    log_info(f"Resume: {args.resume}", args.verbose)
+    log_info(f"Query: {args.query}", args.verbose)
+    log_info(f"Location: {args.location}", args.verbose)
+
     resume_profile = load_or_parse_resume(
         resume_path=Path(args.resume),
         cache_path=Path(RESUME_CACHE),
     )
 
-    print(f"Resume source: {resume_profile.source_file}")
-    print(f"Resume SHA-256: {resume_profile.source_hash}")
+    log_success(f"Resume source: {resume_profile.source_file}", args.verbose)
+    log_success(f"Resume SHA-256: {resume_profile.source_hash}", args.verbose)
+
+    if args.dry_run:
+        log_warning("DRY RUN MODE - No changes will be made", args.verbose)
+
     if args.generate_cover:
-        generate_cover_for_saved_package(args.generate_cover, resume_profile.data["text"])
+        if args.dry_run:
+            log_info(f"Would generate cover letter for package: {args.generate_cover}", args.verbose)
+            return
+        generate_cover_for_saved_package(args.generate_cover, resume_profile.data["text"], args.verbose)
         return
+
     if args.add_package:
+        if args.dry_run:
+            log_info(f"Would add package for {args.title} at {args.company} ({args.add_package})", args.verbose)
+            return
         job = {"url": args.add_package, "title": args.title, "company": args.company, "location": args.location, "email": args.email}
         packages = load_packages(PACKAGES_JSON)
         new_package = {
@@ -916,12 +1214,15 @@ def main():
         }
         packages.append(new_package)
         save_packages(packages, PACKAGES_JSON)
-        print(f"Added package {new_package['job_id']} for {args.title} at {args.company}")
+        log_success(f"Added package {new_package['job_id']} for {args.title} at {args.company}")
         return
+
     if args.search:
         resume_text = resume_profile.data["text"]
-        print(f"Resume characters loaded: {len(resume_text)}")
+        log_info(f"Resume characters loaded: {len(resume_text)}", args.verbose)
 
+        spinner = Spinner("Building CrewAI agents...", args.verbose)
+        spinner.start()
         crew = build_crew(
             resume_text=resume_text,
             resume_source=resume_profile.source_file,
@@ -930,13 +1231,24 @@ def main():
             location=args.location,
             llm=create_llm(),
         )
+        spinner.stop(True, "CrewAI agents ready")
+
+        if args.dry_run:
+            log_info("Would run CrewAI search and create review packages", args.verbose)
+            return
 
         try:
+            spinner = Spinner("Running CrewAI search (this may take a while)...", args.verbose)
+            spinner.start()
             result = crew.kickoff()
+            spinner.stop(True, "CrewAI search complete")
         except Exception as exc:
-            print("\n=== CREW KICKOFF FAILED ===")
-            print(f"Error type: {type(exc).__name__}")
-            print(f"Error: {exc}")
+            spinner.stop(False, "CrewAI search failed")
+            log_error(f"CrewAI kickoff failed: {exc}")
+            if "Connection refused" in str(exc) or "connect" in str(exc).lower():
+                log_error("Is Ollama running? Start it with: ollama serve")
+            elif "SerperDevTool" in str(exc):
+                log_error("Serper API key missing. Set SERPER_API_KEY in .env")
             raise
 
         with open("output/crew_result.txt", "w", encoding="utf-8") as f:
@@ -955,11 +1267,16 @@ def main():
                     seen_urls.add(url)
                     search_results.append({"url": url, "title": "", "company": "", "location": ""})
 
+        log_info(f"Found {len(search_results)} listing page URLs to crawl", args.verbose)
+
+        # Whether to HEAD-verify shortlist URLs (skip for search result fallbacks that block HEAD)
+        verify_shortlist = True
         # Crawl listing pages to extract individual job posting URLs
         if search_results:
             crawled_jobs = crawl_all_listings(
                 search_results,
                 debug=args.debug,
+                verbose=args.verbose,
                 max_pages=args.max_listing_pages,
                 max_per_domain=args.max_pages_per_domain,
             )
@@ -968,18 +1285,68 @@ def main():
                 ensure_output_dir()
                 with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
                     json.dump(shortlist, f, indent=2, ensure_ascii=False)
-                print(f"\nUsing {len(shortlist)} crawled individual job URLs for packages.")
+                log_success(f"\nUsing {len(shortlist)} crawled individual job URLs for packages.")
             else:
-                print("\nCrawl returned no individual job URLs. Falling back to search results.")
-                shortlist = save_shortlist_from_result(result)
+                log_warning("\nCrawl returned no individual job URLs. Using search results directly.")
+                verify_shortlist = False
+                # Try LLM-ranked shortlist first (has titles/company), fallback to search_results URLs
+                shortlist = []
+                try:
+                    llm_shortlist = save_shortlist_from_result(result)
+                    valid_llm = [j for j in llm_shortlist if is_valid_job_url(j.get("url", ""))]
+                    if valid_llm:
+                        shortlist = valid_llm
+                        log_success(f"Using {len(shortlist)} LLM-ranked jobs for packages.")
+                    else:
+                        log_warning("LLM shortlist contained only placeholder/filtered URLs — using Serper URLs.")
+                except Exception as exc:
+                    log_warning(f"Could not load LLM shortlist ({exc}) — using Serper URLs.")
+                if not shortlist:
+                    # Build from search_results; enrich with LLM titles where possible via URL map
+                    url_map = {}
+                    try:
+                        for t in result.tasks_output:
+                            pj = getattr(t, "pydantic", None)
+                            if isinstance(pj, JobList):
+                                for j in pj.jobs:
+                                    url_map[j.url] = j.model_dump()
+                                break
+                    except Exception:
+                        pass
+                    shortlist = []
+                    for s in search_results:
+                        url = s.get("url", "")
+                        if not url:
+                            continue
+                        enriched = url_map.get(url, {})
+                        shortlist.append({
+                            "title": enriched.get("title") or s.get("title", "") or "Untitled",
+                            "company": enriched.get("company") or s.get("company", "") or "Unknown",
+                            "location": enriched.get("location") or s.get("location", ""),
+                            "url": url,
+                            "score": enriched.get("score", 75.0),
+                            "rationale": enriched.get("rationale", ""),
+                        })
+                    if not shortlist:
+                        log_warning("No search result URLs available — falling back to LLM shortlist.")
+                        shortlist = save_shortlist_from_result(result)
+                    else:
+                        ensure_output_dir()
+                        with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
+                            json.dump(shortlist, f, indent=2, ensure_ascii=False)
+                        log_success(f"Using {len(shortlist)} search result URLs for packages.")
         else:
-            print("\nNo search result URLs found to crawl. Falling back to shortlist.")
+            log_warning("\nNo search result URLs found to crawl. Falling back to shortlist.")
             shortlist = save_shortlist_from_result(result)
 
-        save_packages_from_shortlist(shortlist, args.resume, resume_profile.source_hash)
-        print(result)
+        if args.dry_run:
+            log_info(f"Would create {len(shortlist)} review packages", args.verbose)
+            return
+
+        save_packages_from_shortlist(shortlist, args.resume, resume_profile.source_hash, args.verbose, verify=verify_shortlist)
+        log_success("Review packages created successfully")
     elif args.apply_existing:
-        print(f"Using saved application packages from {PACKAGES_JSON}; no new search will run.")
+        log_info(f"Using saved application packages from {PACKAGES_JSON}; no new search will run.", args.verbose)
 
     if args.job_id:
         approved = [
@@ -991,25 +1358,40 @@ def main():
         if not approved:
             raise ValueError("The selected package does not exist or is not approved.")
     elif args.search or args.apply_existing:
-        approved = approval_gate(max_applications=args.max_applications, skip_review=args.skip_review)
+        approved = approval_gate(max_applications=args.max_applications, skip_review=args.skip_review, verbose=args.verbose)
     else:
         approved = []
 
     if approved:
+        applied = 0
+        failed = 0
         for package in approved:
             job = package["job"]
             if args.playwright:
-                apply_with_playwright(
-                    job,
-                    package.get("resume_path") or args.resume,
-                    package["cover_letter"],
-                    auto_submit=args.auto_submit,
-                    review_mode=args.review,
-                )
+                if args.dry_run:
+                    log_info(f"Would apply to: {job.get('title')} @ {job.get('company')}", args.verbose)
+                    continue
+                try:
+                    apply_with_playwright(
+                        job,
+                        package.get("resume_path") or args.resume,
+                        package["cover_letter"],
+                        auto_submit=args.auto_submit,
+                        review_mode=args.review,
+                        verbose=args.verbose,
+                    )
+                    applied += 1
+                except Exception as exc:
+                    # One broken application must not abort the remaining batch;
+                    # the failure was already logged to history by the apply flow.
+                    failed += 1
+                    log_error(f"Skipping to next package after error: {exc}", args.verbose)
             else:
                 log_event("approved_not_submitted", job, {"note": "Playwright disabled", "package_id": package["job_id"]})
+        if args.playwright and not args.dry_run:
+            log_info(f"Apply run complete: {applied} processed, {failed} failed, {len(approved) - applied - failed} skipped.")
     elif args.search or args.apply_existing or args.job_id:
-        print("No applications were approved. Browser automation will not start.")
+        log_warning("No applications were approved. Browser automation will not start.")
 
 
 if __name__ == "__main__":
