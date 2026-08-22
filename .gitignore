@@ -16,5 +16,6 @@ output/*.png
 # Local config overrides and secrets
 config.local.yaml
 .vscode/
+data/resume.pdf
 .env
 .env.*
