@@ -393,11 +393,13 @@ st.caption("Status legend: " + " | ".join([
     for status, color in STATUS_COLORS.items() if status in {"draft", "approved", "submitted", "rejected", "failed"}
 ]), unsafe_allow_html=True)
 
-attention_tab, review_tab, ready_tab, submitted_tab, tracking_tab = st.tabs(
-    TAB_LABELS, key="active_tab", on_change="rerun"
-)
+# Tab bar hidden: the metric cards are the navigation; render only the active section
+active_tab = st.session_state.active_tab
+if active_tab not in TAB_LABELS:  # stale value from an older session
+    active_tab = TAB_LABELS[0]
+    st.session_state.active_tab = active_tab
 
-with attention_tab:
+if active_tab == "Needs attention":
     st.caption("Includes failed automation and draft packages awaiting review.")
     if attention_rows:
         # Add status badges to dataframe
@@ -463,7 +465,7 @@ with attention_tab:
     else:
         st.success("Nothing needs attention right now.")
 
-with submitted_tab:
+elif active_tab == "Submitted":
     st.caption("Applications marked submitted. Days since submission is computed from the submission timestamp.")
     if submitted_rows:
         df_submitted = pd.DataFrame(submitted_rows)
@@ -483,7 +485,7 @@ with submitted_tab:
     else:
         st.info("No submitted applications have been recorded yet.")
 
-with review_tab:
+elif active_tab == "Review queue":
     review_packages = [package for package in packages if package.get("status", "draft") == "draft"]
     if not packages:
         st.info("No application packages yet. Run `crew.py` to create a shortlist and tailored review packages.")
@@ -578,7 +580,7 @@ with review_tab:
                             success, message = launch_in_terminal(arguments)
                             (st.success if success else st.error)(message)
 
-with ready_tab:
+elif active_tab == "Ready to apply":
     approved_packages = [package for package in packages if package.get("status") == "approved"]
     st.caption("Approved packages ready for the browser application flow. You can still edit or return one to draft.")
     if not approved_packages:
@@ -709,7 +711,7 @@ with ready_tab:
                         load_package_rows.clear()
                         st.rerun()
 
-with tracking_tab:
+elif active_tab == "History":
     if not history:
         st.info("No application events have been recorded yet.")
     else:
