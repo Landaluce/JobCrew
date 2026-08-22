@@ -13,12 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew, Process, LLM
 
-from job_automation import ApplicationHistory, load_or_parse_resume, job_id
+from job_automation import ApplicationHistory, load_config, load_or_parse_resume, job_id
 from job_automation.listings import (
     MAX_LISTING_PAGES,
     MAX_PAGES_PER_DOMAIN,
@@ -32,30 +31,6 @@ from job_automation.listings import (
     select_listing_urls,
 )
 from job_automation.packages import load_packages, save_packages
-
-
-def load_config() -> dict[str, Any]:
-    """Load configuration from config.yaml and config.local.yaml."""
-    config = {}
-    config_path = Path("config.yaml")
-    local_config_path = Path("config.local.yaml")
-    
-    if config_path.exists():
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {}
-    
-    if local_config_path.exists():
-        with open(local_config_path) as f:
-            local_config = yaml.safe_load(f) or {}
-            # Deep merge
-            for key, value in local_config.items():
-                if key in config and isinstance(config[key], dict) and isinstance(value, dict):
-                    config[key].update(value)
-                else:
-                    config[key] = value
-    
-    return config
-
 
 CONFIG = load_config()
 

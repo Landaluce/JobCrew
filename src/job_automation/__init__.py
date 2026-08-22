@@ -1,4 +1,5 @@
 from .cache import load_or_parse_resume
+from .config import load_config
 from .history import ApplicationHistory
 from .listings import (
     MAX_LISTING_PAGES,
@@ -34,6 +35,7 @@ __all__ = [
     "is_blacklisted",
     "is_known_job_board",
     "load_blacklist",
+    "load_config",
     "load_or_parse_resume",
     "parse_resume",
     "select_listing_urls",
