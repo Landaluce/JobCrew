@@ -7,7 +7,7 @@ from typing import Any
 from .models import ApplicationRecord
 
 VALID_STATUSES = frozenset({
-    "draft", "approved", "rejected", "prepared", "submitted", "follow_up",
+    "draft", "approved", "rejected", "prepared", "submitted",
     "interview", "offer", "withdrawn", "failed", "skipped_invalid_url",
     "approved_not_submitted", "success", "error",
 })
