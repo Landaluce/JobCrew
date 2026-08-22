@@ -9,7 +9,7 @@ from .models import ApplicationRecord
 VALID_STATUSES = frozenset({
     "draft", "approved", "rejected", "prepared", "submitted",
     "interview", "offer", "withdrawn", "failed", "skipped_invalid_url",
-    "approved_not_submitted", "success", "error",
+    "error",
 })
 
 
@@ -17,6 +17,10 @@ def _normalize_status(status: str) -> str:
     """Map legacy statuses to current canonical values."""
     if status == "applied":
         return "submitted"
+    if status == "success":
+        return "submitted"
+    if status == "approved_not_submitted":
+        return "approved"
     return status
 
 

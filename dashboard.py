@@ -24,7 +24,6 @@ STATUS_COLORS = {
     "approved": "#198754",
     "prepared": "#0d6efd",
     "submitted": "#0d6efd",
-    "success": "#198754",
     "rejected": "#dc3545",
     "failed": "#dc3545",
     "error": "#dc3545",
@@ -32,7 +31,6 @@ STATUS_COLORS = {
     "offer": "#198754",
     "withdrawn": "#6c757d",
     "skipped_invalid_url": "#6c757d",
-    "approved_not_submitted": "#0d6efd",
 }
 
 
@@ -239,7 +237,7 @@ if st.session_state.auto_refresh:
 history = load_history_rows(str(HISTORY_PATH), modified_at(HISTORY_PATH))
 packages = load_package_rows(str(PACKAGES_PATH), modified_at(PACKAGES_PATH))
 
-submitted = sum(row.get("status") in {"submitted", "success"} for row in history)
+submitted = sum(row.get("status") == "submitted" for row in history)
 pending = sum(package.get("status") == "draft" for package in packages)
 ready_to_apply = sum(package.get("status") == "approved" for package in packages)
 with st.sidebar:
@@ -339,7 +337,7 @@ for event_index, event in enumerate(history):
 
 submitted_rows: list[dict[str, Any]] = []
 for event in history:
-    if event.get("status") not in {"submitted", "success"}:
+    if event.get("status") != "submitted":
         continue
     job = event.get("job", event)
     when = event_time(event)
@@ -355,7 +353,8 @@ for event in history:
         "url": job.get("url", ""),
     })
 
-TAB_LABELS = ["Needs attention", "Submitted", "Review queue", "Ready to apply", "Application tracking"]
+TAB_LABELS = ["Needs attention", "Review queue", "Ready to apply", "Submitted", "History"]
+STATUS_OPTIONS = sorted(VALID_STATUSES)
 
 
 def _select_tab(label: str) -> None:
@@ -365,13 +364,13 @@ def _select_tab(label: str) -> None:
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = TAB_LABELS[0]
 
-# Clickable metric cards that switch tabs; "History events" opens Application tracking
+# Clickable metric cards that switch tabs; "History events" opens the History tab
 metric_cards: list[tuple[str, int, str]] = [
     ("Needs attention", len(attention_rows), "Needs attention"),
-    ("Submitted", submitted, "Submitted"),
     ("Review queue", pending, "Review queue"),
     ("Ready to apply", ready_to_apply, "Ready to apply"),
-    ("History events", len(history), "Application tracking"),
+    ("Submitted", submitted, "Submitted"),
+    ("History events", len(history), "History"),
 ]
 with st.container(horizontal=True):
     for card_label, value, target_tab in metric_cards:
@@ -391,10 +390,10 @@ with st.container(horizontal=True):
 # Status legend
 st.caption("Status legend: " + " | ".join([
     f'<span style="background-color: {color}; color: white; padding: 1px 6px; border-radius: 8px; font-size: 0.7rem;">{status}</span>'
-    for status, color in STATUS_COLORS.items() if status in {"draft", "approved", "submitted", "success", "rejected", "failed"}
+    for status, color in STATUS_COLORS.items() if status in {"draft", "approved", "submitted", "rejected", "failed"}
 ]), unsafe_allow_html=True)
 
-attention_tab, submitted_tab, review_tab, ready_tab, tracking_tab = st.tabs(
+attention_tab, review_tab, ready_tab, submitted_tab, tracking_tab = st.tabs(
     TAB_LABELS, key="active_tab", on_change="rerun"
 )
 
@@ -465,7 +464,7 @@ with attention_tab:
         st.success("Nothing needs attention right now.")
 
 with submitted_tab:
-    st.caption("Applications marked submitted or successful. Days since submission is computed from the submission timestamp.")
+    st.caption("Applications marked submitted. Days since submission is computed from the submission timestamp.")
     if submitted_rows:
         df_submitted = pd.DataFrame(submitted_rows)
         st.dataframe(
@@ -501,7 +500,27 @@ with review_tab:
                 if job.get("url"):
                     st.link_button("Open job listing", job["url"], icon=":material/open_in_new:")
                 st.write(job.get("rationale", "No rationale was saved."))
-                
+                current_status = package.get("status", "draft")
+                new_review_status = st.selectbox(
+                    "Status",
+                    STATUS_OPTIONS,
+                    index=STATUS_OPTIONS.index(current_status) if current_status in VALID_STATUSES else 0,
+                    key=f"review-status-{idx}",
+                    help="Change the package status (e.g., approve, reject, or withdraw)",
+                )
+                if new_review_status != current_status:
+                    package["status"] = new_review_status
+                    save_packages(packages, PACKAGES_PATH)
+                    ApplicationHistory(HISTORY_PATH).append({
+                        "job": job,
+                        "status": new_review_status,
+                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "details": {"note": f"Status changed from {current_status} via dashboard"},
+                    })
+                    load_package_rows.clear()
+                    load_history_rows.clear()
+                    st.rerun()
+
                 # Cover letter editor
                 cover_letter = st.text_area(
                     "Cover letter (editable)",
@@ -586,7 +605,6 @@ with ready_tab:
             success, message = launch_in_terminal(arguments)
             (st.success if success else st.error)(message)
         st.divider()
-        status_options = sorted(VALID_STATUSES)
         for idx, package in enumerate(approved_packages):
             job = package["job"]
             with st.container(border=True):
@@ -598,8 +616,8 @@ with ready_tab:
                 current_status = package.get("status", "approved")
                 new_status = st.selectbox(
                     "Status",
-                    status_options,
-                    index=status_options.index(current_status) if current_status in VALID_STATUSES else 0,
+                    STATUS_OPTIONS,
+                    index=STATUS_OPTIONS.index(current_status) if current_status in VALID_STATUSES else 0,
                     key=f"ready-status-{idx}",
                     help="Change the package status (e.g., return to draft or mark withdrawn)",
                 )
@@ -627,6 +645,17 @@ with ready_tab:
                             if success:
                                 load_package_rows.clear()
                                 st.rerun()
+                notes = st.text_area(
+                    "Notes",
+                    value=package.get("notes", ""),
+                    height=100,
+                    key=f"ready-notes-{idx}",
+                    help="Reviewer or application notes (saved automatically)",
+                )
+                if notes != package.get("notes", ""):
+                    package["notes"] = notes
+                    save_packages(packages, PACKAGES_PATH)
+                    load_package_rows.clear()
                 col1, col2, col3, col4, col5 = st.columns([1, 2, 1, 1, 1])
                 with col1:
                     auto_submit = st.checkbox(

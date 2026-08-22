@@ -17,7 +17,7 @@ def main() -> None:
     history = ApplicationHistory(Path(args.history))
     records = history.records()
 
-    submitted = [r for r in records if r.get("status") in {"submitted", "success"}]
+    submitted = [r for r in records if r.get("status") == "submitted"]
 
     if not submitted:
         print("No submitted applications found.")

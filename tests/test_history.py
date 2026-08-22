@@ -41,6 +41,43 @@ def test_applied_not_in_valid_statuses() -> None:
     assert "applied" not in VALID_STATUSES
 
 
+def test_history_normalizes_legacy_success_on_read(tmp_path: Path) -> None:
+    """Legacy 'success' status in stored JSON is normalized to 'submitted'."""
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps([{"status": "success", "job": {"title": "Engineer"}}]), encoding="utf-8")
+    records = ApplicationHistory(path).records()
+    assert records[0]["status"] == "submitted"
+
+
+def test_history_rejects_legacy_success_status(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unsupported"):
+        ApplicationHistory(tmp_path / "history.json").append({"status": "success"})
+
+
+def test_success_not_in_valid_statuses() -> None:
+    assert "success" not in VALID_STATUSES
+
+
+def test_history_normalizes_legacy_approved_not_submitted_on_read(tmp_path: Path) -> None:
+    """Legacy 'approved_not_submitted' status in stored JSON becomes 'approved'."""
+    path = tmp_path / "history.json"
+    path.write_text(
+        json.dumps([{"status": "approved_not_submitted", "job": {"title": "Engineer"}}]),
+        encoding="utf-8",
+    )
+    records = ApplicationHistory(path).records()
+    assert records[0]["status"] == "approved"
+
+
+def test_history_rejects_legacy_approved_not_submitted_status(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unsupported"):
+        ApplicationHistory(tmp_path / "history.json").append({"status": "approved_not_submitted"})
+
+
+def test_approved_not_submitted_not_in_valid_statuses() -> None:
+    assert "approved_not_submitted" not in VALID_STATUSES
+
+
 def test_history_writes_valid_json_atomically(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     history = ApplicationHistory(path)

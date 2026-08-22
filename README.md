@@ -126,10 +126,10 @@ Emails are automatically extracted from:
 | Tab | Shows |
 | ----- | ------- |
 | **Needs attention** | Failed jobs, follow-ups due, draft packages awaiting review |
-| **Submitted** | Applications marked submitted or successful |
+| **Submitted** | Applications marked submitted |
 | **Review queue** | Draft packages to approve/reject |
 | **Ready to apply** | Approved packages for browser automation |
-| **Application tracking** | Full editable history with email column |
+| **History** | Full editable history with email column |
 
 ## Data conventions
 
