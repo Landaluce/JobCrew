@@ -561,6 +561,7 @@ with ready_tab:
             success, message = launch_in_terminal(arguments)
             (st.success if success else st.error)(message)
         st.divider()
+        status_options = sorted(VALID_STATUSES)
         for idx, package in enumerate(approved_packages):
             job = package["job"]
             with st.container(border=True):
@@ -569,9 +570,38 @@ with ready_tab:
                 if job.get("url"):
                     st.link_button("Open job listing", job["url"], icon=":material/open_in_new:")
                 st.write(job.get("rationale", "No rationale was saved."))
-                if package.get("cover_letter"):
-                    with st.expander("Cover letter"):
+                current_status = package.get("status", "approved")
+                new_status = st.selectbox(
+                    "Status",
+                    status_options,
+                    index=status_options.index(current_status) if current_status in VALID_STATUSES else 0,
+                    key=f"ready-status-{idx}",
+                    help="Change the package status (e.g., return to draft or mark withdrawn)",
+                )
+                if new_status != current_status:
+                    package["status"] = new_status
+                    save_packages(packages, PACKAGES_PATH)
+                    ApplicationHistory(HISTORY_PATH).append({
+                        "job": job,
+                        "status": new_status,
+                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "details": {"note": f"Status changed from {current_status} via dashboard"},
+                    })
+                    load_package_rows.clear()
+                    load_history_rows.clear()
+                    st.rerun()
+                with st.expander("Cover letter", expanded=bool(package.get("cover_letter"))):
+                    if package.get("cover_letter"):
                         st.write(package["cover_letter"])
+                    else:
+                        st.caption("No cover letter yet.")
+                        if st.button("Generate cover letter", key=f"ready-gen-cover-{idx}", icon=":material/auto_awesome:", help="Generate a tailored cover letter"):
+                            with st.spinner("Generating cover letter…"):
+                                success, output = run_project_command(["crew.py", "--generate-cover", package["job_id"]])
+                            (st.success if success else st.error)(output or "Cover letter command finished.")
+                            if success:
+                                load_package_rows.clear()
+                                st.rerun()
                 col1, col2, col3, col4, col5 = st.columns([1, 2, 1, 1, 1])
                 with col1:
                     auto_submit = st.checkbox(
