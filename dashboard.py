@@ -505,7 +505,7 @@ with review_tab:
                     "Status",
                     STATUS_OPTIONS,
                     index=STATUS_OPTIONS.index(current_status) if current_status in VALID_STATUSES else 0,
-                    key=f"review-status-{idx}",
+                    key=f"review-status-{package['job_id'][:12]}",
                     help="Change the package status (e.g., approve, reject, or withdraw)",
                 )
                 if new_review_status != current_status:
@@ -526,7 +526,7 @@ with review_tab:
                     "Cover letter (editable)",
                     value=package.get("cover_letter", ""),
                     height=200,
-                    key=f"cover_letter_review_{idx}",
+                    key=f"cover_letter_review_{package['job_id'][:12]}",
                     help="Edit the cover letter before approving",
                 )
                 if cover_letter != package.get("cover_letter", ""):
@@ -618,7 +618,7 @@ with ready_tab:
                     "Status",
                     STATUS_OPTIONS,
                     index=STATUS_OPTIONS.index(current_status) if current_status in VALID_STATUSES else 0,
-                    key=f"ready-status-{idx}",
+                    key=f"ready-status-{package['job_id'][:12]}",
                     help="Change the package status (e.g., return to draft or mark withdrawn)",
                 )
                 if new_status != current_status:
@@ -649,7 +649,7 @@ with ready_tab:
                     "Notes",
                     value=package.get("notes", ""),
                     height=100,
-                    key=f"ready-notes-{idx}",
+                    key=f"ready-notes-{package['job_id'][:12]}",
                     help="Reviewer or application notes (saved automatically)",
                 )
                 if notes != package.get("notes", ""):
@@ -714,6 +714,8 @@ with tracking_tab:
         st.info("No application events have been recorded yet.")
     else:
         st.subheader("Full history (editable)")
+        # Package notes are the latest per-job notes; show them when an event has none
+        package_notes = {p.get("job_id"): p.get("notes", "") for p in packages}
         table = pd.DataFrame([
             {
                 "timestamp": event.get("timestamp", event.get("created_at", "")),
@@ -728,7 +730,11 @@ with tracking_tab:
                 ),
                 "job_id": job_id(event.get("job", event)),
                 "url": event.get("job", {}).get("url", event.get("url", "")),
-                "notes": event.get("details", {}).get("note", event.get("notes", "")),
+                "notes": (
+                    event.get("details", {}).get("note")
+                    or event.get("notes", "")
+                    or package_notes.get(job_id(event.get("job", event)), "")
+                ),
             }
             for event in history
         ])
@@ -742,6 +748,7 @@ with tracking_tab:
                 "url": st.column_config.LinkColumn("Job listing"),
                 "score": st.column_config.NumberColumn("Fit score", format="%.0f"),
                 "job_id": st.column_config.TextColumn("Job ID"),
+                "notes": st.column_config.TextColumn("Notes", width="large", help="Event note, or the package's latest notes"),
             },
         )
         # Show status badges for quick visual scanning
