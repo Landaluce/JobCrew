@@ -1,0 +1,3 @@
+[server]
+# Hide developer controls (Deploy button, Rerun, Clear cache) from the toolbar
+toolbarMode = "viewer"
