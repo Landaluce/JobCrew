@@ -311,7 +311,6 @@ def was_already_applied(job: dict[str, Any]) -> bool:
 
     final_statuses = {
         "submitted",
-        "success",
     }
 
     for event in history_store.records():
@@ -377,6 +376,54 @@ def is_valid_job_url(url: str) -> bool:
         if entry_lower in url_lower or entry_lower in domain:
             return False
     return True
+
+
+def _fetch_page_text(url: str, max_chars: int = 6000) -> str:
+    """Fetch a page and return crude visible text for LLM scoring."""
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
+        html = urllib.request.urlopen(req, timeout=15, context=ctx).read(200_000).decode("utf-8", errors="ignore")
+        text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+        return re.sub(r"\s+", " ", text).strip()[:max_chars]
+    except Exception:
+        return ""
+
+
+def score_job_with_llm(job: dict[str, Any], resume_text: str, llm: Any) -> tuple[float, str] | None:
+    """Ask the LLM to score one job's fit (0-100). Returns (score, rationale) or None."""
+    page_text = _fetch_page_text(job.get("url", ""))
+    parts = [
+        f"Title: {job.get('title', '')}",
+        f"Company: {job.get('company', '')}",
+        f"Location: {job.get('location', '')}",
+    ]
+    if page_text:
+        parts.append(f"Posting excerpt: {page_text}")
+    listing = "\n".join(parts)
+    if len(listing.strip()) < 40:
+        return None
+    try:
+        reply = str(llm.call(
+            f"Candidate resume summary:\n{resume_text[:3000]}\n\n"
+            f"Job posting:\n{listing}\n\n"
+            "Score this job's fit for the candidate from 0 to 100. "
+            "Reply on ONE line starting with the number, then ' - ' and a short reason. "
+            "Example: 82 - strong Python match"
+        ))
+        match = re.match(r"\D*(\d{1,3})\s*(?:[-—:.]\s*)?(.*)", reply.strip())
+        if not match:
+            return None
+        score = float(min(100, max(0, int(match.group(1)))))
+        return score, match.group(2).strip()[:300]
+    except Exception as exc:
+        log_warning(f"LLM scoring failed: {exc}")
+        return None
 
 
 def verify_url_resolves(url: str, timeout: int = 10) -> bool:
@@ -540,6 +587,12 @@ def save_packages_from_shortlist(shortlist: list[dict], resume_path: str, resume
         "resume_path": resume_path, "resume_hash": resume_hash, "status": "draft", "notes": "",
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     } for job in verified_jobs]
+    if not packages:
+        log_warning(
+            "No valid jobs produced review packages — "
+            "existing application_packages.json left untouched."
+        )
+        return []
     save_packages(packages, PACKAGES_JSON)
     log_success(f"Saved {len(packages)} review packages to {PACKAGES_JSON}", verbose)
     return packages
@@ -1180,6 +1233,14 @@ def main():
             log_info(f"Would add package for {args.title} at {args.company} ({args.add_package})", args.verbose)
             return
         job = {"url": args.add_package, "title": args.title, "company": args.company, "location": args.location, "email": args.email}
+        spinner = Spinner("Scoring job fit...", args.verbose)
+        spinner.start()
+        scored = score_job_with_llm(job, resume_profile.data["text"], create_llm())
+        if scored:
+            job["score"], job["rationale"] = scored
+            spinner.stop(True, f"Fit score: {job['score']:.0f}")
+        else:
+            spinner.stop(False, "Scoring unavailable — package saved without score")
         packages = load_packages(PACKAGES_JSON)
         new_package = {
             "job_id": job_id(job), "job": job, "cover_letter": "", "answers": {},
@@ -1362,7 +1423,7 @@ def main():
                     failed += 1
                     log_error(f"Skipping to next package after error: {exc}", args.verbose)
             else:
-                log_event("approved_not_submitted", job, {"note": "Playwright disabled", "package_id": package["job_id"]})
+                log_info(f"Skipping {job.get('title', 'Untitled')} — Playwright disabled; approved package left as-is.", args.verbose)
         if args.playwright and not args.dry_run:
             log_info(f"Apply run complete: {applied} processed, {failed} failed, {len(approved) - applied - failed} skipped.")
     elif args.search or args.apply_existing or args.job_id:
