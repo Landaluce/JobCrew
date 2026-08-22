@@ -170,6 +170,26 @@ def inject_keyboard_shortcuts():
     """, unsafe_allow_javascript=True)
 
 
+def sync_package_status(target_job_id: str, job: dict[str, Any], new_status: str) -> None:
+    """Mirror a status change onto the matching application package so it appears in the right tab."""
+    for package in packages:
+        if package.get("job_id") == target_job_id:
+            package["status"] = new_status
+            break
+    else:
+        packages.append({
+            "job_id": target_job_id,
+            "job": job,
+            "cover_letter": "",
+            "resume_path": "",
+            "resume_hash": "",
+            "answers": {},
+            "status": new_status,
+        })
+    save_packages(packages, PACKAGES_PATH)
+    load_package_rows.clear()
+
+
 def render_package_editor(package: dict[str, Any], form_key: str) -> None:
     with st.form(form_key):
         status = st.selectbox(
@@ -230,7 +250,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Run JobCrew")
     with st.form("new-search", border=False):
-        search_query = st.text_input("Job search query", value=CONFIG.get("search", {}).get("query", "python developer remote"), help="Search query for job search (e.g., 'python developer remote')")
+        search_query = st.text_input("Job search query", value=CONFIG.get("search", {}).get("query", "python developer remote"), help="Search query for job search (e.g., 'python')")
         search_location = st.text_input("Location", value=CONFIG.get("search", {}).get("location", "Remote"), help="Target location for job search")
         with st.expander("Advanced options"):
             max_listing_pages = st.number_input(
@@ -419,6 +439,7 @@ with attention_tab:
             if saved:
                 event["status"] = status
                 event.setdefault("details", {})["note"] = notes
+                sync_package_status(item["job_id"], event.get("job", event), status)
                 ApplicationHistory(HISTORY_PATH).replace(history)
                 load_history_rows.clear()
                 st.rerun()
@@ -434,6 +455,7 @@ with attention_tab:
                     blacklist.append(domain)
                     BLACKLIST_PATH.write_text(json.dumps(blacklist, indent=2), encoding="utf-8")
                 event["status"] = "rejected"
+                sync_package_status(item["job_id"], event.get("job", event), "rejected")
                 ApplicationHistory(HISTORY_PATH).replace(history)
                 load_history_rows.clear()
                 st.rerun()
