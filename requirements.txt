@@ -5,5 +5,6 @@ playwright
 pandas
 reportlab
 python-dotenv
+pyyaml
 streamlit
 pytest

@@ -13,14 +13,8 @@ output/*.txt
 output/*.pdf
 output/*.png
 
-# Local Python environments and secrets
-.venv/
-venv/
-.env
-.env.*
-
-# Local Python environments and secrets
-.venv/
-venv/
+# Local config overrides and secrets
+config.local.yaml
+.vscode/
 .env
 .env.*
