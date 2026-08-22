@@ -9,39 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
 import pandas as pd
 import streamlit as st
 
-from job_automation import ApplicationHistory, job_id
+from job_automation import ApplicationHistory, job_id, load_config
 from job_automation.history import VALID_STATUSES
 from job_automation.packages import load_packages, save_packages
 
-
-def load_config() -> dict[str, Any]:
-    """Load configuration from config.yaml and config.local.yaml."""
-    config = {}
-    config_path = Path("config.yaml")
-    local_config_path = Path("config.local.yaml")
-    
-    if config_path.exists():
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {}
-    
-    if local_config_path.exists():
-        with open(local_config_path) as f:
-            local_config = yaml.safe_load(f) or {}
-            # Deep merge
-            for key, value in local_config.items():
-                if key in config and isinstance(config[key], dict) and isinstance(value, dict):
-                    config[key].update(value)
-                else:
-                    config[key] = value
-    
-    return config
-
-
-CONFIG = load_config()
+CONFIG = load_config(Path(__file__).parent)
 
 # Status color mapping
 STATUS_COLORS = {
@@ -168,9 +143,8 @@ def confirm_dialog(message: str, key: str) -> bool:
 
 
 def inject_keyboard_shortcuts():
-    """Inject JavaScript for keyboard shortcuts using iframe."""
-    st.components.v1.iframe("about:blank", height=0)
-    st.markdown("""
+    """Inject JavaScript for keyboard shortcuts."""
+    st.html("""
     <script>
     document.addEventListener('keydown', function(e) {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
@@ -193,7 +167,7 @@ def inject_keyboard_shortcuts():
         }
     });
     </script>
-    """, unsafe_allow_html=True)
+    """, unsafe_allow_javascript=True)
 
 
 def render_package_editor(package: dict[str, Any], form_key: str) -> None:
@@ -258,6 +232,19 @@ with st.sidebar:
     with st.form("new-search", border=False):
         search_query = st.text_input("Job search query", value=CONFIG.get("search", {}).get("query", "python developer remote"), help="Search query for job search (e.g., 'python developer remote')")
         search_location = st.text_input("Location", value=CONFIG.get("search", {}).get("location", "Remote"), help="Target location for job search")
+        with st.expander("Advanced options"):
+            max_listing_pages = st.number_input(
+                "Max listing pages", min_value=1, max_value=50,
+                value=int(CONFIG.get("search", {}).get("max_listing_pages", 5)),
+                help="Maximum number of listing pages to crawl per search",
+            )
+            max_pages_per_domain = st.number_input(
+                "Max pages per domain", min_value=1, max_value=20,
+                value=int(CONFIG.get("search", {}).get("max_pages_per_domain", 2)),
+                help="Maximum listing pages crawled per domain",
+            )
+            dry_run = st.toggle("Dry run", value=False, help="Preview actions without creating packages")
+            verbose = st.toggle("Verbose output", value=False, help="Show detailed logs during the search")
         run_search = st.form_submit_button("Create a new review queue", icon=":material/search:", help="Search for jobs and create review packages")
     if run_search:
         log_container = st.container()
@@ -265,7 +252,18 @@ with st.sidebar:
             st.info("🔄 Starting job search...", icon=":material/hourglass_empty:")
         status_text = st.empty()
         status_text.info("Loading resume...")
-        success, output = run_project_command_streaming(["crew.py", "--search", "--query", search_query, "--location", search_location], log_container)
+        arguments = [
+            "crew.py", "--search",
+            "--query", str(search_query),
+            "--location", str(search_location),
+            "--max-listing-pages", str(max_listing_pages),
+            "--max-pages-per-domain", str(max_pages_per_domain),
+        ]
+        if verbose:
+            arguments.append("--verbose")
+        if dry_run:
+            arguments.append("--dry-run")
+        success, output = run_project_command_streaming(arguments, log_container)
         if success:
             status_text.success("New review queue created.")
         else:
@@ -335,12 +333,38 @@ for event in history:
         "url": job.get("url", ""),
     })
 
+TAB_LABELS = ["Needs attention", "Submitted", "Review queue", "Ready to apply", "Application tracking"]
+
+
+def _select_tab(label: str) -> None:
+    st.session_state.active_tab = label
+
+
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = TAB_LABELS[0]
+
+# Clickable metric cards that switch tabs; "History events" opens Application tracking
+metric_cards: list[tuple[str, int, str]] = [
+    ("Needs attention", len(attention_rows), "Needs attention"),
+    ("Submitted", submitted, "Submitted"),
+    ("Review queue", pending, "Review queue"),
+    ("Ready to apply", ready_to_apply, "Ready to apply"),
+    ("History events", len(history), "Application tracking"),
+]
 with st.container(horizontal=True):
-    st.metric("Needs attention", len(attention_rows), border=True)
-    st.metric("Submitted", submitted, border=True)
-    st.metric("Review queue", pending, border=True)
-    st.metric("Ready to apply", ready_to_apply, border=True)
-    st.metric("History events", len(history), border=True)
+    for card_label, value, target_tab in metric_cards:
+        st.button(
+            f"**{value}** {card_label}",
+            key=f"metric-{card_label.lower().replace(' ', '-')}",
+            icon=":material/warning:" if card_label == "Needs attention"
+            else ":material/mark_email_read:" if card_label == "Submitted"
+            else ":material/inbox:" if card_label == "Review queue"
+            else ":material/play_circle:" if card_label == "Ready to apply"
+            else ":material/timeline:",
+            on_click=_select_tab,
+            args=(target_tab,),
+            type="primary" if card_label == st.session_state.active_tab else "secondary",
+        )
 
 # Status legend
 st.caption("Status legend: " + " | ".join([
@@ -349,7 +373,7 @@ st.caption("Status legend: " + " | ".join([
 ]), unsafe_allow_html=True)
 
 attention_tab, submitted_tab, review_tab, ready_tab, tracking_tab = st.tabs(
-    ["Needs attention", "Submitted", "Review queue", "Ready to apply", "Application tracking"]
+    TAB_LABELS, key="active_tab", on_change="rerun"
 )
 
 with attention_tab:
@@ -521,10 +545,16 @@ with ready_tab:
             key="batch-auto-submit",
             help="Automatically submit all applications after review",
         )
-        if st.button("Apply all approved", type="primary", icon=":material/play_arrow:", key="batch-apply", help="Apply to all approved packages"):
+        configured_cap = CONFIG.get("application", {}).get("max_applications")
+        batch_limit = min(int(configured_cap), len(approved_packages)) if configured_cap else len(approved_packages)
+        batch_help = (
+            f"Apply to up to {batch_limit} approved packages (capped by config application.max_applications)"
+            if configured_cap else "Apply to all approved packages"
+        )
+        if st.button("Apply all approved", type="primary", icon=":material/play_arrow:", key="batch-apply", help=batch_help):
             arguments = [
                 "crew.py", "--apply-existing", "--playwright", "--review",
-                "--max-applications", str(len(approved_packages)),
+                "--max-applications", str(batch_limit),
             ]
             if batch_auto_submit:
                 arguments.append("--auto-submit")
