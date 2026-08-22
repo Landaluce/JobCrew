@@ -331,6 +331,7 @@ for event_index, event in enumerate(history):
             "reason": reason, "status": status,
             "company": job.get("company", "Unknown"), "title": job.get("title", "Untitled"),
             "email": job.get("email", ""),
+            "score": job.get("score") if isinstance(job.get("score"), (int, float)) else None,
             "url": job.get("url", ""), "timestamp": event.get("timestamp", event.get("created_at", "")),
             "job_id": jid,
             "source": "history", "source_index": event_index,
@@ -347,6 +348,7 @@ for event in history:
         "company": job.get("company", "Unknown"),
         "title": job.get("title", "Untitled"),
         "email": job.get("email", ""),
+        "score": job.get("score") if isinstance(job.get("score"), (int, float)) else None,
         "job_id": job_id(job),
         "submitted_at": event.get("timestamp", event.get("created_at", "")),
         "days_since_submission": age_days,
@@ -400,7 +402,7 @@ with attention_tab:
     st.caption("Includes failed automation and draft packages awaiting review.")
     if attention_rows:
         # Add status badges to dataframe
-        df_attention = pd.DataFrame(attention_rows)[["reason", "status", "company", "title", "email", "job_id", "url", "timestamp"]]
+        df_attention = pd.DataFrame(attention_rows)[["reason", "status", "company", "title", "email", "score", "job_id", "url", "timestamp"]]
         st.dataframe(
             df_attention,
             hide_index=True,
@@ -412,7 +414,7 @@ with attention_tab:
         )
         # Show status badges below
         for row in attention_rows:
-            st.markdown(f"{row['company']} — {row['title']}: {status_badge(row['status'])}", unsafe_allow_html=True)
+            st.markdown(f"{row['company']} — {row['title']} (score: {row.get('score', 'n/a')}): {status_badge(row['status'])}", unsafe_allow_html=True)
         
         selected_attention = st.selectbox(
             "Edit an attention item",
@@ -472,12 +474,13 @@ with submitted_tab:
             column_config={
                 "url": st.column_config.LinkColumn("Job listing"),
                 "days_since_submission": st.column_config.NumberColumn("Days since submission", format="%d"),
+                "score": st.column_config.NumberColumn("Fit score", format="%.0f"),
                 "job_id": st.column_config.TextColumn("Job ID"),
             },
         )
         # Show status badges
         for row in submitted_rows:
-            st.markdown(f"{row['company']} — {row['title']}: {status_badge('submitted')} — {row['days_since_submission']} days since submission", unsafe_allow_html=True)
+            st.markdown(f"{row['company']} — {row['title']} (score: {row.get('score', 'n/a')}): {status_badge('submitted')} — {row['days_since_submission']} days since submission", unsafe_allow_html=True)
     else:
         st.info("No submitted applications have been recorded yet.")
 
@@ -588,7 +591,7 @@ with ready_tab:
             job = package["job"]
             with st.container(border=True):
                 st.markdown(f"### {job.get('title', 'Untitled')} at {job.get('company', 'Unknown')} {status_badge(package.get('status', 'approved'))}", unsafe_allow_html=True)
-                st.caption(f"ID: `{package['job_id']}`")
+                st.caption(f"{job.get('location', 'Location not specified')} · fit score: {job.get('score', 'n/a')} · ID: `{package['job_id']}`")
                 if job.get("url"):
                     st.link_button("Open job listing", job["url"], icon=":material/open_in_new:")
                 st.write(job.get("rationale", "No rationale was saved."))
@@ -689,6 +692,11 @@ with tracking_tab:
                 "company": event.get("job", {}).get("company", event.get("company", "")),
                 "title": event.get("job", {}).get("title", event.get("title", "")),
                 "email": event.get("job", {}).get("email", event.get("email", "")),
+                "score": (
+                    event.get("job", {}).get("score")
+                    if isinstance(event.get("job", {}).get("score"), (int, float))
+                    else None
+                ),
                 "job_id": job_id(event.get("job", event)),
                 "url": event.get("job", {}).get("url", event.get("url", "")),
                 "notes": event.get("details", {}).get("note", event.get("notes", "")),
@@ -699,10 +707,11 @@ with tracking_tab:
             table,
             key="history_editor",
             hide_index=True,
-            disabled=["timestamp", "company", "title", "job_id", "url"],
+            disabled=["timestamp", "company", "title", "score", "job_id", "url"],
             column_config={
                 "status": st.column_config.SelectboxColumn("Status", options=sorted(VALID_STATUSES), help="Application status"),
                 "url": st.column_config.LinkColumn("Job listing"),
+                "score": st.column_config.NumberColumn("Fit score", format="%.0f"),
                 "job_id": st.column_config.TextColumn("Job ID"),
             },
         )
