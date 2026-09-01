@@ -75,8 +75,28 @@ def add_to_blacklist(path: str | Path, entries: list[str]) -> list[str]:
 
 
 def is_blacklisted(path: str | Path, url: str) -> bool:
-    url_lower = (url or "").lower()
-    return any(entry.lower() in url_lower for entry in load_blacklist(path))
+    """Check whether a URL is covered by a blacklist entry.
+
+    Bare-domain entries (e.g. ``dead.example.com``, written by the dashboard's
+    "block domain" action) match the URL's host exactly or as a subdomain.
+    Full-URL entries match the URL as a substring. Plain substring matching of
+    a bare domain would over-block unrelated hosts like ``notdead.example.computer``.
+    """
+    url = (url or "").strip()
+    if not url:
+        return False
+    url_lower = url.lower()
+    parsed_domain = urlparse(url).netloc.lower().removeprefix("www.")
+    for entry in load_blacklist(path):
+        entry = entry.strip().lower()
+        if not entry:
+            continue
+        if "." in entry and not entry.startswith(("http://", "https://")):
+            if parsed_domain and (parsed_domain == entry or parsed_domain.endswith("." + entry)):
+                return True
+        elif entry in url_lower:
+            return True
+    return False
 
 
 def select_listing_urls(

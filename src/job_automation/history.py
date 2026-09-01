@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .identity import job_id as compute_job_id
 from .models import ApplicationRecord
 
 VALID_STATUSES = frozenset({
@@ -65,8 +66,17 @@ class ApplicationHistory:
         )
         temporary_path.replace(self.path)
 
-    def find_by_job_id(self, job_id: str) -> dict[str, Any] | None:
-        return next(
-            (record for record in self.records() if record.get("job_id") == job_id),
-            None,
-        )
+    def find_by_job_id(self, target_job_id: str) -> dict[str, Any] | None:
+        """Find the first record matching a job ID.
+
+        Matches either a top-level ``job_id`` field (``ApplicationRecord``
+        style) or a ``job`` dict whose canonical URL hashes to the ID
+        (the event style written by ``crew.py`` and the dashboard).
+        """
+        for record in self.records():
+            if record.get("job_id") == target_job_id:
+                return record
+            job = record.get("job")
+            if isinstance(job, dict) and compute_job_id(job) == target_job_id:
+                return record
+        return None

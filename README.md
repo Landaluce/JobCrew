@@ -24,7 +24,6 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 4. Review and approve packages in the dashboard. Generate a tailored cover letter only after approval, from the **Ready to apply** tab.
 5. Optional Playwright assistance uploads the resume and fills a cover letter. It opens a visible browser and does not submit unless `--auto-submit` is specified.
 6. Application events are stored in `output/application_history.json`; use the dashboard and weekly report to track them.
-7. Email addresses are automatically extracted from job posting pages and Gmail inbox for follow-up automation.
 
 ## Commands
 
@@ -39,7 +38,7 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 .venv/bin/python crew.py --resume data/resume.pdf --query "backend engineer" --location Remote --max-listing-pages 10 --max-pages-per-domain 3
 
 # Add a single job package manually
-.venv/bin/python crew.py --add-package "https://..." --title "Dev" --company "Acme" --email "hr@acme.com"
+.venv/bin/python crew.py --add-package "https://..." --title "Dev" --company "Acme"
 
 # Review approved packages in a visible browser, without submitting
 .venv/bin/python crew.py --apply-existing --playwright --review
@@ -53,16 +52,12 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 # Open the review queue and tracking dashboard
 .venv/bin/streamlit run dashboard.py
 
-# Generate summary reports
+# Generate summary reports for the last 7 days (--days changes the window)
 .venv/bin/python report_weekly.py
+.venv/bin/python report_weekly.py --days 30
 
-# Follow-up automation
-.venv/bin/python monitor.py --after-days 7                    # List follow-up candidates
-.venv/bin/python monitor.py --extract-emails                  # Extract emails from URLs + inbox
-.venv/bin/python monitor.py --extract-emails --inbox-only     # Inbox search only
-.venv/bin/python monitor.py --after-days 7 --send-email      # Auto-send follow-up emails
-.venv/bin/python monitor.py --after-days 7 --notify          # Desktop notification
-.venv/bin/python monitor.py --after-days 7 --dry-run         # Preview without sending
+# Report days since submission for submitted applications
+.venv/bin/python monitor.py
 
 # Run the test suite
 .venv/bin/python -m pytest -q
@@ -81,7 +76,6 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 | `--add-package URL` | str | — | Manually add a job package from a URL |
 | `--title` | str | `Untitled` | Job title (with `--add-package`) |
 | `--company` | str | `Unknown` | Company name (with `--add-package`) |
-| `--email` | str | `""` | Contact email (with `--add-package`) |
 | `--job-id JOB_ID` | str | — | Apply one specific approved package without prompting |
 | `--playwright` | flag | false | Enable browser automation |
 | `--auto-submit` | flag | false | Allow automatic submit (opt-in only) |
@@ -95,55 +89,31 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 
 **Listing-page crawl**: before opening a browser, each listing page URL is checked with a fast HEAD request. Dead/parked/unreachable pages are skipped and recorded in `output/blacklist.json` so future runs skip them instantly.
 
-## Email and follow-up setup
-
-Add to `.env` for follow-up email automation:
-
-```bash
-# SMTP (for sending)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your_email@gmail.com
-SMTP_PASS=your_app_password
-FROM_EMAIL=your_email@gmail.com
-
-# IMAP (for inbox search)
-IMAP_HOST=imap.gmail.com
-IMAP_PORT=993
-IMAP_USER=your_email@gmail.com
-IMAP_PASS=your_app_password
-```
-
-For Gmail, generate an [app password](https://myaccount.google.com/apppasswords) (required with 2FA).
-
-Emails are automatically extracted from:
-
-- Job posting pages during crawl (regex scan for `email@domain.com`)
-- Gmail inbox search by company name
-
 ## Dashboard tabs
 
 | Tab | Shows |
 | ----- | ------- |
-| **Needs attention** | Failed jobs, follow-ups due, draft packages awaiting review |
+| **Needs attention** | Failed applications and draft packages awaiting review |
 | **Submitted** | Applications marked submitted |
 | **Review queue** | Draft packages to approve/reject |
 | **Ready to apply** | Approved packages for browser automation |
-| **History** | Full editable history with email column |
+| **History** | Full editable history |
 
 ## Data conventions
 
 Job identity is a SHA-256-derived ID based on the canonical job URL (tracking parameters removed), with company/title/location as a fallback. This prevents most duplicate applications when listings are rediscovered through a different tracking URL.
 
-History uses defined lifecycle statuses: `draft`, `approved`, `prepared`, `submitted`, `follow_up`, `interview`, `offer`, `withdrawn`, `rejected`, `failed`, and related legacy statuses. Generated output and local credentials are ignored by Git.
+History uses defined lifecycle statuses: `draft`, `approved`, `prepared`, `submitted`, `interview`, `offer`, `withdrawn`, `rejected`, `failed`, `skipped_invalid_url`, `error`, and related legacy statuses. Generated output and local credentials are ignored by Git.
 
 ## Project layout
 
 - `src/job_automation/` — reusable resume, identity, package, history, and listing-selection primitives.
-- `crew.py` — CLI entrypoint: CrewAI agent workflow, approval gate, listing-page crawl with pre-crawl liveness checks and blacklist persistence, Playwright apply flow.
-- `crew.py` — agent workflow, CLI approval gate, and `--add-package` for manual entry.
-- `dashboard.py` — Streamlit review queue, tracking view, and email management.
-- `playwright_sites.py` — conservative site handlers; add an adapter per application system.
-- `monitor.py` — follow-up checker with email extraction, auto-send, and desktop notifications.
+- `crew.py` — CLI entrypoint: CrewAI agent workflow, approval gate, shortlist/package creation, and `--add-package` for manual entry.
+- `crawler.py` — listing-page crawling with pre-crawl liveness checks and blacklist persistence, plus job-URL extraction.
+- `applier.py` — the Playwright apply flow (resume upload, cover-letter fill, opt-in submit).
+- `cli_ui.py` / `events.py` — terminal UI helpers and history/CSV event logging.
+- `dashboard.py` — Streamlit review queue, tracking view, and history management.
+- `playwright_sites.py` — conservative site handlers (Greenhouse); add an adapter per application system.
+- `monitor.py` — days-since-submission report.
 - `report_weekly.py` — weekly metrics (Markdown + PDF).
 - `tests/` — cache, history, identity, and package tests.

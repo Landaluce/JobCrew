@@ -55,9 +55,9 @@ AI-powered job-search and application tool using CrewAI agents, Playwright brows
 
 - `src/job_automation/` — installable library (resume parsing, history, identity, packages). No heavy dependencies; tests live in `tests/`.
 - `crew.py` — CLI entrypoint: CrewAI agent workflow, approval gate, Playwright apply flow, and listing-page crawl step.
-- `dashboard.py` — Streamlit app with 5 tabs: Needs attention, Submitted, Review queue, Ready to apply, Application tracking.
+- `dashboard.py` — Streamlit app with 5 tabs: Needs attention, Review queue, Ready to apply, Submitted, History.
 - `playwright_sites.py` — site-specific form-filling handlers (Greenhouse, Lever). Add new adapters here.
-- `monitor.py` — follow-up checker. `report_weekly.py` — weekly metrics (Markdown + PDF).
+- `monitor.py` — days-since-submission report. `report_weekly.py` — weekly metrics over a configurable window (Markdown + PDF).
 - `output/` — all generated data (packages, history, metrics, screenshots). Git-ignored.
 
 ## Key conventions
@@ -72,7 +72,7 @@ AI-powered job-search and application tool using CrewAI agents, Playwright brows
 
 ## Gotchas
 
-- `crew.py` imports `crewai`, `crewai-tools`, `playwright`, `streamlit`, and `pydantic` at the top level — if any are missing, the entire CLI fails at import time.
+- `crew.py` imports `crewai`, `crewai-tools`, and `pydantic` at the top level — if any are missing, the entire CLI fails at import time. `playwright` is imported defensively (try/except) by `crawler.py` and `applier.py`, so the CLI still works for search-only runs without it.
 - The default LLM is local Ollama (`llama3.2:3b`). If Ollama isn't running, CrewAI agent calls will fail.
 - The search agent returns listing/search page URLs, not individual job postings. A Playwright crawl step (`crawl_all_listings()`) visits each listing page and extracts individual job posting URLs using URL pattern matching before creating application packages.
 - The crawl runs in headless Chrome and scrolls pages to trigger lazy-loaded content. It extracts links matching patterns like `/jobs/view/`, `/job/\d+`, `greenhouse.io/jobs/`, and `lever.co/company/role`.

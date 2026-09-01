@@ -78,3 +78,30 @@ def test_blacklist_dedupes_case_insensitively(tmp_path: Path) -> None:
     add_to_blacklist(path, ["https://Dead.Example.com/jobs"])
     merged = add_to_blacklist(path, ["https://dead.example.com/jobs"])
     assert len(merged) == 1
+
+
+def test_blacklist_bare_domain_matches_host_and_subdomains(tmp_path: Path) -> None:
+    path = tmp_path / "blacklist.json"
+    add_to_blacklist(path, ["dead.example.com"])
+
+    assert is_blacklisted(path, "https://dead.example.com/jobs/42")
+    assert is_blacklisted(path, "https://careers.dead.example.com/role")
+    assert is_blacklisted(path, "http://www.dead.example.com")
+    # Similar-looking hosts must not be caught by substring matching
+    assert not is_blacklisted(path, "https://notdead.example.com/jobs")
+    assert not is_blacklisted(path, "https://dead.example.computer.com/jobs")
+    assert not is_blacklisted(path, "https://example.com/jobs")
+
+
+def test_blacklist_full_url_matches_substring(tmp_path: Path) -> None:
+    path = tmp_path / "blacklist.json"
+    add_to_blacklist(path, ["https://dead.example.com/jobs/42"])
+
+    assert is_blacklisted(path, "https://dead.example.com/jobs/42?utm_source=x")
+    assert not is_blacklisted(path, "https://dead.example.com/careers")
+
+
+def test_blacklist_empty_url_is_never_blocked(tmp_path: Path) -> None:
+    path = tmp_path / "blacklist.json"
+    add_to_blacklist(path, ["example.com"])
+    assert not is_blacklisted(path, "")

@@ -36,7 +36,6 @@ llm:
 dashboard:
   auto_refresh: true
   refresh_interval: 30
-  follow_up_days: 7
 
 # Output paths
 output:

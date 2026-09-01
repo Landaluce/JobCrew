@@ -13,6 +13,20 @@ def test_history_appends_and_finds_a_record(tmp_path: Path) -> None:
     assert history.find_by_job_id("job-1")["company"] == "Acme"
 
 
+def test_history_finds_record_by_job_dict_identity(tmp_path: Path) -> None:
+    """Events written by crew.py store the job under a 'job' key, not a top-level job_id."""
+    from job_automation import job_id
+
+    job = {"url": "https://boards.greenhouse.io/acme/jobs/42?gh_src=tracking", "title": "Engineer", "company": "Acme"}
+    history = ApplicationHistory(tmp_path / "history.json")
+    history.append({"status": "submitted", "job": job})
+
+    found = history.find_by_job_id(job_id(job))
+    assert found is not None
+    assert found["job"]["company"] == "Acme"
+    assert history.find_by_job_id("does-not-exist") is None
+
+
 def test_history_recovers_from_invalid_json(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     path.write_text("not json", encoding="utf-8")
