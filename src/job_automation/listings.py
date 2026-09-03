@@ -74,6 +74,19 @@ def add_to_blacklist(path: str | Path, entries: list[str]) -> list[str]:
     return merged
 
 
+def remove_from_blacklist(path: str | Path, entries: list[str]) -> list[str]:
+    """Remove entries (case-insensitively) from the blacklist and persist atomically."""
+    existing = load_blacklist(path)
+    removed_lower = {str(entry).strip().lower() for entry in entries if str(entry).strip()}
+    remaining = [entry for entry in existing if entry.lower() not in removed_lower]
+    if remaining != existing:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(remaining, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+    return remaining
+
+
 def is_blacklisted(path: str | Path, url: str) -> bool:
     """Check whether a URL is covered by a blacklist entry.
 
@@ -158,7 +171,7 @@ def check_listing_url(url: str, timeout: int = 10) -> tuple[bool, str]:
         if isinstance(reason, (socket.timeout, TimeoutError)):
             return False, "timeout"
         return False, "unreachable"
-    except (socket.timeout, TimeoutError):
+    except TimeoutError:
         return False, "timeout"
     except Exception:
         return False, "unreachable"

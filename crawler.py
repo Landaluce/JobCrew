@@ -48,7 +48,10 @@ JOB_URL_PATTERNS = [
     r"smartrecruiters\.com/",                # SmartRecruiters
     r"icims\.com/",                          # iCIMS
     r"jobvite\.com/",                        # Jobvite
-    r"ashbyhq\.com/@",                       # Ashby
+    r"ashbyhq\.com/@",                       # Ashby (company page shorthand)
+    r"jobs\.ashbyhq\.com/[\w-]+/[\w-]+",    # Ashby direct posting
+    r"myworkdayjobs\.com/.*/job/",           # Workday
+    r"workdayjobs\.com/",                    # Workday (generic)
     r"notion\.site/",                        # Notion-hosted boards
     r"linkedin\.com/jobs/view/",             # LinkedIn explicit
     r"indeed\.com/viewjob",                  # Indeed explicit
@@ -77,6 +80,53 @@ JOB_URL_KEYWORDS = [
 ]
 
 INVALID_JOB_DOMAINS = ["example.com", "example.org", "example.net", "test.com", "localhost"]
+
+
+def matches_job_posting_url(url: str) -> bool:
+    """Return True when a URL looks like an individual job posting.
+
+    Pure pattern/keyword matching over the URL; no network access. Used both
+    by the crawl loop and by unit tests.
+    """
+    if not url:
+        return False
+    # Patterns like "/openings/" assume a trailing slash that real crawl links
+    # often omit; test both the raw URL and the slash-terminated form.
+    url_variants = [url]
+    parsed = urlparse(url)
+    if parsed.path and not parsed.path.endswith("/"):
+        url_variants.append(url + "/")
+    for candidate in url_variants:
+        if any(re.search(pat, candidate, re.IGNORECASE) for pat in JOB_URL_PATTERNS):
+            return True
+    # Keyword patterns all expect a trailing slash (e.g. "/openings/"); real
+    # crawl links often omit it, so normalize before the substring check.
+    path = urlparse(url).path.lower()
+    if path and not path.endswith("/"):
+        path += "/"
+    return any(keyword in path for keyword in JOB_URL_KEYWORDS)
+
+
+def link_domain_is_acceptable(href: str, listing_url: str) -> bool:
+    """Reject parked/suspicious domains and off-board cross-domain links.
+
+    Links from the listing page itself (same host or a subdomain of either
+    side) and links pointing at known job boards are accepted; anything else
+    is treated as navigation clutter (logins, marketing, analytics...).
+    """
+    href_domain = domain_of(href)
+    if not href_domain:
+        return False
+    if any(marker in href_domain for marker in PARKED_DOMAIN_MARKERS):
+        return False
+    listing_domain = domain_of(listing_url)
+    is_same_domain = (
+        href_domain == listing_domain
+        or listing_domain in href_domain
+        or href_domain in listing_domain
+    )
+    is_known_board = any(board in href_domain for board in KNOWN_JOB_BOARD_DOMAINS)
+    return is_same_domain or is_known_board
 
 
 def verify_url_resolves(url: str, timeout: int = 10) -> bool:
@@ -172,30 +222,19 @@ def crawl_listing_page(url: str, debug: bool = False) -> list[dict[str, str]]:
                 all_found_urls.append(href)
 
                 # Skip tracking/utility links
-                if any(skip in href.lower() for skip in ["/login", "/signup", "/auth", "/help", "javascript:", "/about", "/contact", "/privacy", "/terms", "/cookie"]):
+                skip_tokens = [
+                    "/login", "/signup", "/auth", "/help", "javascript:", "/about",
+                    "/contact", "/privacy", "/terms", "/cookie",
+                ]
+                if any(skip in href.lower() for skip in skip_tokens):
                     continue
 
-                # Check if URL matches a job posting pattern
-                is_job_url = any(re.search(pat, href, re.IGNORECASE) for pat in JOB_URL_PATTERNS)
-
-                # Fallback: check for job-related keywords in URL path
-                if not is_job_url:
-                    path = urlparse(href).path.lower()
-                    is_job_url = any(kw in path for kw in JOB_URL_KEYWORDS)
-
-                if not is_job_url:
+                if not matches_job_posting_url(href):
                     continue
 
-                # Domain sanity check: reject URLs from parked/suspicious domains
-                # and cross-domain links that aren't from known job boards
-                href_domain = domain_of(href)
-                listing_domain = domain_of(url)
-                is_same_domain = href_domain == listing_domain or listing_domain in href_domain or href_domain in listing_domain
-                is_known_job_board = any(kb in href_domain for kb in KNOWN_JOB_BOARD_DOMAINS)
-                is_parked = any(marker in href_domain for marker in PARKED_DOMAIN_MARKERS)
-                if is_parked:
-                    continue
-                if not is_same_domain and not is_known_job_board:
+                # Domain sanity check: reject parked/suspicious domains and
+                # cross-domain links that aren't from known job boards
+                if not link_domain_is_acceptable(href, url):
                     continue
 
                 # Try to get the link text as the job title
@@ -219,11 +258,11 @@ def crawl_listing_page(url: str, debug: bool = False) -> list[dict[str, str]]:
     if not job_links and debug:
         print(f"  [debug] Total links on page: {len(all_found_urls)}")
         if all_found_urls:
-            print(f"  [debug] First 10 URLs found:")
+            print("  [debug] First 10 URLs found:")
             for u in all_found_urls[:10]:
                 print(f"    {u}")
         else:
-            print(f"  [debug] No links found — page may have failed to render or is JS-heavy")
+            print("  [debug] No links found — page may have failed to render or is JS-heavy")
 
     return job_links
 
@@ -247,7 +286,11 @@ def crawl_all_listings(
     selected = select_listing_urls(search_results, max_pages=max_pages, max_per_domain=max_per_domain)
     total_urls = len({item.get("url", "").strip() for item in search_results if item.get("url", "").strip()})
     skipped_by_caps = total_urls - len(selected)
-    log_info(f"\n=== CRAWLING {len(selected)} LISTING PAGES ({skipped_by_caps} skipped by caps/domain limits) ===", verbose)
+    log_info(
+        f"\n=== CRAWLING {len(selected)} LISTING PAGES "
+        f"({skipped_by_caps} skipped by caps/domain limits) ===",
+        verbose,
+    )
 
     pages_with_results = 0
     pages_empty = 0

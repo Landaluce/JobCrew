@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from job_automation.history import ApplicationHistory, VALID_STATUSES
+from job_automation.history import VALID_STATUSES, ApplicationHistory
 
 
 def test_history_appends_and_finds_a_record(tmp_path: Path) -> None:

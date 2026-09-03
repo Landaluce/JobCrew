@@ -1,5 +1,6 @@
 import argparse
-import os, json
+import json
+import os
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from statistics import mean
@@ -16,7 +17,7 @@ METRICS_JSON = "output/application_metrics.json"
 def load_history():
     if not os.path.exists(HISTORY_JSON):
         return []
-    with open(HISTORY_JSON, "r", encoding="utf-8") as f:
+    with open(HISTORY_JSON, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -90,7 +91,11 @@ def save_markdown(metrics):
         f"- Total attempts: {metrics['total_attempts']}",
         f"- Avg applications/day: {metrics['avg_applications_per_day']:.2f}",
         f"- Submission success rate: {metrics['submission_success_rate']:.2%}",
-        f"- Avg approval turnaround hours: {metrics['avg_approval_turnaround_hours']:.2f}" if metrics["avg_approval_turnaround_hours"] is not None else "- Avg approval turnaround hours: n/a",
+        (
+            f"- Avg approval turnaround hours: {metrics['avg_approval_turnaround_hours']:.2f}"
+            if metrics["avg_approval_turnaround_hours"] is not None
+            else "- Avg approval turnaround hours: n/a"
+        ),
         "",
         "## Top Sites\n",
     ]

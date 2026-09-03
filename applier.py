@@ -26,11 +26,13 @@ def apply_with_playwright(
     if not PLAYWRIGHT_AVAILABLE:
         raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install")
 
-    details = {"site": "unknown", "steps": [], "submitted": False}
+    details: dict[str, Any] = {"site": "unknown", "steps": [], "submitted": False}
+    pick_handler: Any = None
     try:
-        from playwright_sites import pick_handler
+        from playwright_sites import pick_handler as _site_pick_handler
+        pick_handler = _site_pick_handler
     except Exception:
-        pick_handler = None
+        pass
 
     application_url = str(job.get("url") or "").strip()
 

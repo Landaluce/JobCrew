@@ -1,27 +1,78 @@
-import os
-import json
 import argparse
+import json
+import os
 import re
-import sys
-import urllib.request
 import ssl
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from crewai import Agent, Task, Crew, Process, LLM
-
-from job_automation import load_config, load_or_parse_resume, job_id
-from job_automation.listings import MAX_LISTING_PAGES, MAX_PAGES_PER_DOMAIN
-from job_automation.packages import load_packages, save_packages
-from cli_ui import Colors, Spinner, log_debug, log_error, log_info, log_success, log_warning
+from applier import apply_with_playwright
+from cli_ui import Colors, Spinner, log_error, log_info, log_success, log_warning
 from crawler import crawl_all_listings, is_valid_job_url, verify_url_resolves
 from events import ensure_output_dir, history_store, log_event
-from applier import apply_with_playwright
+from job_automation import (
+    job_id,
+    load_config,
+    load_or_parse_resume,
+    recover_jobs_from_text,
+)
+from job_automation.listings import MAX_LISTING_PAGES, MAX_PAGES_PER_DOMAIN
+from job_automation.packages import load_packages, save_packages
+
+# crewai/pydantic are heavy and must stay optional at import time: the CLI
+# (help text, apply-only runs, dashboard launches) must work even when they
+# are not installed. They are imported inside the functions that need them.
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    load_dotenv = None  # type: ignore[assignment]
+
+if load_dotenv is not None:
+    load_dotenv()
+
+try:
+    from pydantic import BaseModel
+except ImportError:  # pragma: no cover
+    BaseModel = None  # type: ignore[assignment,misc]
 
 CONFIG = load_config()
+
+
+class _UnavailableModel:
+    """Stand-in for output schemas when pydantic is not installed.
+
+    ``isinstance(anything, _UnavailableModel)`` is always False, so the
+    structured-output checks below simply never match and the code falls
+    back to its raw-text recovery paths with a clear error.
+    """
+
+
+if BaseModel is not None:
+
+    class JobItem(BaseModel):
+        title: str
+        company: str
+        location: str
+        url: str
+        score: float
+        rationale: str
+
+    class JobList(BaseModel):
+        jobs: list[JobItem]
+
+    class CoverLetterResult(BaseModel):
+        cover_letter: str
+
+    class TailoredResumeResult(BaseModel):
+        tailored_resume: str
+
+else:  # pragma: no cover - exercised only without pydantic installed
+    JobItem = _UnavailableModel  # type: ignore[misc,assignment]
+    JobList = _UnavailableModel  # type: ignore[misc,assignment]
+    CoverLetterResult = _UnavailableModel  # type: ignore[misc,assignment]
+    TailoredResumeResult = _UnavailableModel  # type: ignore[misc,assignment]
 
 
 def get_help_examples():
@@ -45,6 +96,9 @@ def get_help_examples():
   {Colors.CYAN}# Generate cover letter for a specific approved package{Colors.RESET}
   python crew.py --generate-cover JOB_ID
 
+  {Colors.CYAN}# Generate a per-job tailored resume for an approved package{Colors.RESET}
+  python crew.py --generate-resume JOB_ID
+
   {Colors.CYAN}# Dry run to preview what would happen{Colors.RESET}
   python crew.py --search --resume data/resume.pdf --query "python developer" --dry-run
 
@@ -65,7 +119,7 @@ class CustomHelpFormatter(argparse.HelpFormatter):
 try:
     from crewai_tools import SerperDevTool
 except ImportError:
-    SerperDevTool = None
+    SerperDevTool = None  # type: ignore[misc,assignment]
 
 SHORTLIST_JSON = "output/shortlist.json"
 PACKAGES_JSON = "output/application_packages.json"
@@ -73,7 +127,10 @@ RESUME_CACHE = "output/resume_profile.json"
 BLACKLIST_JSON = "output/blacklist.json"
 
 
-def create_llm() -> LLM:
+def create_llm() -> Any:
+    """Build the configured CrewAI LLM; crewai is imported lazily."""
+    from crewai import LLM
+
     model = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
@@ -82,23 +139,6 @@ def create_llm() -> LLM:
         base_url=base_url,
         temperature=0.2,
     )
-
-class JobItem(BaseModel):
-    title: str
-    company: str
-    location: str
-    url: str
-    score: float
-    rationale: str
-
-
-class JobList(BaseModel):
-    jobs: list[JobItem]
-
-
-class CoverLetterResult(BaseModel):
-    cover_letter: str
-
 
 def was_already_applied(job: dict[str, Any]) -> bool:
     identity = job_id(job)
@@ -119,30 +159,77 @@ def was_already_applied(job: dict[str, Any]) -> bool:
     return False
 
 
-def save_shortlist_from_result(result) -> list[dict]:
-    """
-    Find the JobList Pydantic output produced by rank_task and save it.
+def find_shortlist_in_result(result) -> list[dict]:
+    """Recover a job shortlist from a finished crew run.
 
-    Do not use result.json here: CrewOutput represents the final task
-    (application_task), which currently produces raw text rather than JSON.
+    Tries, in order: the structured ``JobList`` pydantic output of any task,
+    then raw-text recovery (local models sometimes return fenced or slightly
+    malformed JSON that CrewAI could not coerce into the schema).
     """
-    ensure_output_dir()
-    shortlist: list[dict] = []
-
     for task_output in result.tasks_output:
         pydantic_output = getattr(task_output, "pydantic", None)
-
         if isinstance(pydantic_output, JobList):
-            shortlist = [
-                job.model_dump()
-                for job in pydantic_output.jobs
-            ]
-            break
+            return [job.model_dump() for job in pydantic_output.jobs]
+
+    for task_output in result.tasks_output:
+        raw = getattr(task_output, "raw", "")
+        recovered = recover_jobs_from_text(raw)
+        if recovered:
+            return recovered
+    return []
+
+
+def _repair_shortlist_text(raw_text: str, llm: Any) -> list[dict]:
+    """Ask the LLM to reformat a malformed shortlist payload into clean JSON."""
+    try:
+        reply = str(llm.call(
+            "The text below is a job shortlist that a previous model turn "
+            "returned without valid JSON. Reformat it into EXACTLY this JSON "
+            "shape and reply with nothing else:\n"
+            '{"jobs": [{"title": "...", "company": "...", "location": "...", '
+            '"url": "...", "score": 0, "rationale": "..."}]}\n\n'
+            f"Raw text:\n{raw_text[:12000]}"
+        ))
+        return recover_jobs_from_text(reply)
+    except Exception as exc:
+        log_warning(f"Shortlist repair failed: {exc}")
+        return []
+
+
+def save_shortlist_from_result(result, llm: Any = None, verbose: bool = False) -> list[dict]:
+    """Find the ranked-job shortlist from a crew run and persist it.
+
+    The primary source is the structured ``JobList`` pydantic output of the
+    ranking task. When that is missing (common with small local models that
+    return fenced or malformed JSON), the raw task text is parsed with
+    tolerant JSON recovery; if that also fails and an ``llm`` is available,
+    one repair pass asks the model to reformat its own output.
+
+    Do not use result.json here: CrewOutput represents the final task output,
+    which is raw text rather than JSON.
+    """
+    ensure_output_dir()
+    shortlist = find_shortlist_in_result(result)
+
+    if not shortlist and llm is not None:
+        raw_parts = [
+            getattr(task_output, "raw", "")
+            for task_output in result.tasks_output
+            if isinstance(getattr(task_output, "raw", ""), str)
+        ]
+        raw_text = "\n".join(raw_parts)
+        if raw_text.strip():
+            log_warning("No structured shortlist found — asking the model to repair its JSON output.", verbose)
+            shortlist = _repair_shortlist_text(raw_text, llm)
+            if shortlist:
+                log_success(f"Recovered {len(shortlist)} jobs via repair pass.", verbose)
 
     if not shortlist:
         raise RuntimeError(
-            "Could not find a structured JobList from rank_task. "
-            "Check the Job Ranking Agent output in output/crew_result.txt."
+            "Could not find a structured JobList from rank_task, and raw-text "
+            "recovery found nothing usable. Check the Job Ranking Agent output "
+            "in output/crew_result.txt; smaller local models often need "
+            "OLLAMA_MODEL upgraded or a JSON-capable model for reliable output."
         )
 
     with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
@@ -200,15 +287,25 @@ def score_job_with_llm(job: dict[str, Any], resume_text: str, llm: Any) -> tuple
         return None
 
 
-def save_packages_from_shortlist(shortlist: list[dict], resume_path: str, resume_hash: str, verbose: bool = False, verify: bool = True) -> list[dict]:
-    """Create review packages; cover letters are generated only after approval."""
+def save_packages_from_shortlist(
+    shortlist: list[dict],
+    resume_path: str,
+    resume_hash: str,
+    verbose: bool = False,
+    verify: bool = True,
+) -> list[dict]:
+    """Create review packages; cover letters and resumes are tailored only after approval."""
     valid_jobs = [job for job in shortlist if is_valid_job_url(job.get("url", ""), BLACKLIST_JSON)]
     if len(valid_jobs) < len(shortlist):
         log_warning(f"Filtered out {len(shortlist) - len(valid_jobs)} jobs with invalid/placeholder URLs.", verbose)
     if verify:
         verified_jobs = [job for job in valid_jobs if verify_url_resolves(job.get("url", ""))]
         if len(verified_jobs) < len(valid_jobs):
-            log_warning(f"Filtered out {len(valid_jobs) - len(verified_jobs)} jobs that redirect to parked domains.", verbose)
+            log_warning(
+                f"Filtered out {len(valid_jobs) - len(verified_jobs)} jobs that "
+                "redirect to parked domains.",
+                verbose,
+            )
             # Fallback: if HEAD verification filters all valid jobs (common for search result pages
             # that block HEAD), keep valid jobs so Serper results still become packages.
             if not verified_jobs and valid_jobs:
@@ -218,7 +315,7 @@ def save_packages_from_shortlist(shortlist: list[dict], resume_path: str, resume
         verified_jobs = valid_jobs
         log_info("Skipping HEAD verification for search result URLs.", verbose)
     packages = [{
-        "job_id": job_id(job), "job": job, "cover_letter": "", "answers": {},
+        "job_id": job_id(job), "job": job, "cover_letter": "", "tailored_resume": "", "answers": {},
         "resume_path": resume_path, "resume_hash": resume_hash, "status": "draft", "notes": "",
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     } for job in verified_jobs]
@@ -233,39 +330,103 @@ def save_packages_from_shortlist(shortlist: list[dict], resume_path: str, resume
     return packages
 
 
-def generate_cover_letter(job: dict[str, Any], resume_text: str, llm: LLM) -> str:
+def _structured_generation(prompt: str, schema: type, llm: Any) -> dict[str, Any]:
+    """Run a one-agent structured-generation task and return the pydantic payload.
+
+    crewai is imported lazily so the CLI stays importable without it; the
+    callers of this helper only reach it when generation is actually needed.
+    """
+    from crewai import Agent, Crew, Process, Task
+
     agent = Agent(
-        role="Cover Letter Generator",
-        goal="Write a concise, truthful, tailored cover letter.",
+        role="Application Content Generator",
+        goal="Write truthful, job-specific application content from resume evidence only.",
         backstory="You never invent qualifications and use only supplied resume evidence.",
         llm=llm,
         verbose=True,
     )
     task = Task(
-        description=f"""Write a concise cover letter for this job. Use only resume evidence and do not invent facts.
-Job: {json.dumps(job, ensure_ascii=False)}
-Resume: {resume_text}""",
-        expected_output="A tailored cover letter.",
+        description=prompt,
+        expected_output="Structured content.",
         agent=agent,
-        output_pydantic=CoverLetterResult,
+        output_pydantic=schema,
     )
     result = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=True).kickoff()
     parsed = getattr(result, "pydantic", None)
-    if not isinstance(parsed, CoverLetterResult):
-        raise RuntimeError("Cover-letter generation did not return structured output.")
-    return parsed.cover_letter
+    if not isinstance(parsed, schema):
+        raise RuntimeError("Generation did not return structured output.")
+    return parsed.model_dump()  # type: ignore[attr-defined]
 
 
-def generate_cover_for_saved_package(package_id: str, resume_text: str, verbose: bool = False) -> None:
-    packages = load_packages(PACKAGES_JSON)
+def generate_cover_letter(job: dict[str, Any], resume_text: str, llm: Any) -> str:
+    payload = _structured_generation(
+        prompt=(
+            "Write a concise cover letter for this job. Use only resume evidence and do not invent facts.\n"
+            f"Job: {json.dumps(job, ensure_ascii=False)}\nResume: {resume_text}"
+        ),
+        schema=CoverLetterResult,
+        llm=llm,
+    )
+    return payload["cover_letter"]
+
+
+def generate_tailored_resume(job: dict[str, Any], resume_text: str, llm: Any) -> str:
+    """Ask the LLM to rewrite the resume's bullets around one posting."""
+    payload = _structured_generation(
+        prompt=(
+            "Rewrite ONLY the work-experience bullet points and summary of the resume so they "
+            "align with this job posting. Keep every claim truthful and grounded in the original "
+            "resume text: never add skills, titles, or metrics that are not already present. "
+            "Return a complete, copy-pasteable tailored resume section (summary + experience bullets).\n"
+            f"Job: {json.dumps(job, ensure_ascii=False)}\nResume: {resume_text}"
+        ),
+        schema=TailoredResumeResult,
+        llm=llm,
+    )
+    return payload["tailored_resume"]
+
+
+def _approved_package(packages: list[dict], package_id: str, action: str) -> dict:
     package = next((item for item in packages if item.get("job_id") == package_id), None)
     if package is None:
         raise ValueError(f"No package found for job ID: {package_id}")
     if package.get("status") != "approved":
-        raise ValueError("Approve a package before generating its cover letter.")
+        raise ValueError(f"Approve a package before generating its {action}.")
+    return package
+
+
+def generate_cover_for_saved_package(package_id: str, resume_text: str, verbose: bool = False) -> None:
+    packages = load_packages(PACKAGES_JSON)
+    package = _approved_package(packages, package_id, "cover letter")
     package["cover_letter"] = generate_cover_letter(package["job"], resume_text, create_llm())
     save_packages(packages, PACKAGES_JSON)
     log_success("Cover letter generated and saved.", verbose)
+
+
+def generate_resume_for_saved_package(package_id: str, resume_text: str, verbose: bool = False) -> Path:
+    """Generate a per-job tailored resume for an approved package.
+
+    The tailored text is stored on the package (``tailored_resume``) and also
+    written to ``output/tailored_resumes/<job_id>.txt`` so the human reviewer
+    can open, edit, and upload it next to the original resume file.
+    """
+    packages = load_packages(PACKAGES_JSON)
+    package = _approved_package(packages, package_id, "tailored resume")
+    job = package["job"]
+    package["tailored_resume"] = generate_tailored_resume(job, resume_text, create_llm())
+    save_packages(packages, PACKAGES_JSON)
+
+    destination_dir = Path("output/tailored_resumes")
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / f"{package_id}.txt"
+    header = (
+        f"# Tailored resume — {job.get('title', 'Untitled')} at {job.get('company', 'Unknown')}\n"
+        f"# Job: {job.get('url', '')}\n"
+        "# Review before using. The original resume file is still what gets uploaded by default.\n\n"
+    )
+    destination.write_text(header + package["tailored_resume"], encoding="utf-8")
+    log_success(f"Tailored resume saved to {destination}.", verbose)
+    return destination
 
 
 def approval_gate(
@@ -278,7 +439,7 @@ def approval_gate(
         log_warning(f"No application packages found at {packages_path}", verbose)
         return []
 
-    approved = []
+    approved: list[dict] = []
     packages = load_packages(packages_path)
     for package in packages:
         if max_applications is not None and len(approved) >= max_applications:
@@ -291,6 +452,7 @@ def approval_gate(
                 "job_id": job_id(job),
                 "job": job,
                 "cover_letter": "",
+                "tailored_resume": "",
                 "answers": {},
                 "resume_path": "",
                 "resume_hash": "",
@@ -300,7 +462,7 @@ def approval_gate(
         else:
             job = package["job"]
         if not is_valid_job_url(job.get("url", ""), BLACKLIST_JSON):
-            log_warning(f"\n=== SKIPPING PLACEHOLDER URL ===", verbose)
+            log_warning("\n=== SKIPPING PLACEHOLDER URL ===", verbose)
             log_warning(f"{job.get('title')} @ {job.get('company')}", verbose)
             log_warning(f"URL: {job.get('url')}", verbose)
             continue
@@ -314,7 +476,7 @@ def approval_gate(
             package["status"] = "approved"
             approved.append(package)
             log_event("approved", job, {"approval_turnaround_hours": 0, "package_id": package["job_id"]})
-            log_success(f"\n=== AUTO-APPROVED ===", verbose)
+            log_success("\n=== AUTO-APPROVED ===", verbose)
             log_success(f"{job.get('title')} @ {job.get('company')}", verbose)
             log_success(f"URL: {job.get('url')}", verbose)
             continue
@@ -342,9 +504,12 @@ def approval_gate(
 def build_crew(
     resume_text: str,
     resume_source: str,
-    resume_hash: str, query: str,
+    resume_hash: str,
+    query: str,
     location: str,
-    llm=None,):
+    llm: Any = None,
+) -> Any:
+    from crewai import Agent, Crew, Process, Task
 
     tools = []
     if SerperDevTool is not None:
@@ -392,7 +557,11 @@ def build_crew(
         agent=resume_agent,
     )
     search_task = Task(
-        description=f"Find relevant job listing pages for query '{query}' and location '{location}'. Return listing page URLs (search result pages from job boards like LinkedIn, Indeed, etc.), title, company, and location for each listing found.",
+        description=(
+            f"Find relevant job listing pages for query '{query}' and location '{location}'. "
+            "Return listing page URLs (search result pages from job boards like "
+            "LinkedIn, Indeed, etc.), title, company, and location for each listing found."
+        ),
         expected_output="List of job listing page URLs.",
         agent=search_agent,
     )
@@ -448,13 +617,23 @@ def main():
     input_group.add_argument("--location", default=location_default, help="Target job location")
 
     run_group = parser.add_argument_group("Run Mode")
-    run_group.add_argument("--search", action="store_true", help="Run CrewAI search, crawl listings, and create review packages")
+    run_group.add_argument(
+        "--search", action="store_true",
+        help="Run CrewAI search, crawl listings, and create review packages",
+    )
     run_group.add_argument(
         "--apply-existing",
         action="store_true",
         help="Apply to existing saved packages (requires --playwright)",
     )
-    run_group.add_argument("--generate-cover", metavar="JOB_ID", help="Generate a letter for one approved saved package")
+    run_group.add_argument(
+        "--generate-cover", metavar="JOB_ID",
+        help="Generate a letter for one approved saved package",
+    )
+    run_group.add_argument(
+        "--generate-resume", metavar="JOB_ID",
+        help="Generate a per-job tailored resume for one approved saved package",
+    )
     run_group.add_argument("--add-package", metavar="URL", help="Add a single job package from a URL")
     run_group.add_argument("--title", default="Untitled", help="Job title (used with --add-package)")
     run_group.add_argument("--company", default="Unknown", help="Company name (used with --add-package)")
@@ -462,9 +641,15 @@ def main():
     run_group.add_argument("--playwright", action="store_true", help="Enable browser automation")
     run_group.add_argument("--auto-submit", action="store_true", help="Allow automatic submit in Playwright flow")
     run_group.add_argument("--review", action="store_true", help="Pause for manual review before submitting")
-    run_group.add_argument("--skip-review", action="store_true", help="Auto-approve all draft packages (skip interactive approval gate)")
+    run_group.add_argument(
+        "--skip-review", action="store_true",
+        help="Auto-approve all draft packages (skip interactive approval gate)",
+    )
     run_group.add_argument("--full-cycle", action="store_true", help="Search + auto-approve + apply in one run")
-    run_group.add_argument("--max-applications", type=int, default=max_apps_default, help="Maximum number of approved jobs to apply to")
+    run_group.add_argument(
+        "--max-applications", type=int, default=max_apps_default,
+        help="Maximum number of approved jobs to apply to",
+    )
     run_group.add_argument("--debug", action="store_true", help="Show extra diagnostics during listing crawl")
     run_group.add_argument("--dry-run", action="store_true", help="Preview actions without making changes")
     run_group.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
@@ -520,6 +705,13 @@ def main():
         generate_cover_for_saved_package(args.generate_cover, resume_profile.data["text"], args.verbose)
         return
 
+    if args.generate_resume:
+        if args.dry_run:
+            log_info(f"Would generate tailored resume for package: {args.generate_resume}", args.verbose)
+            return
+        generate_resume_for_saved_package(args.generate_resume, resume_profile.data["text"], args.verbose)
+        return
+
     if args.add_package:
         if args.dry_run:
             log_info(f"Would add package for {args.title} at {args.company} ({args.add_package})", args.verbose)
@@ -535,7 +727,7 @@ def main():
             spinner.stop(False, "Scoring unavailable — package saved without score")
         packages = load_packages(PACKAGES_JSON)
         new_package = {
-            "job_id": job_id(job), "job": job, "cover_letter": "", "answers": {},
+            "job_id": job_id(job), "job": job, "cover_letter": "", "tailored_resume": "", "answers": {},
             "resume_path": args.resume, "resume_hash": resume_profile.source_hash,
             "status": "draft", "notes": "",
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -551,13 +743,14 @@ def main():
 
         spinner = Spinner("Building CrewAI agents...", args.verbose)
         spinner.start()
+        crew_llm = create_llm()
         crew = build_crew(
             resume_text=resume_text,
             resume_source=resume_profile.source_file,
             resume_hash=resume_profile.source_hash,
             query=args.query,
             location=args.location,
-            llm=create_llm(),
+            llm=crew_llm,
         )
         spinner.stop(True, "CrewAI agents ready")
 
@@ -621,7 +814,7 @@ def main():
                 # Try LLM-ranked shortlist first (has titles/company), fallback to search_results URLs
                 shortlist = []
                 try:
-                    llm_shortlist = save_shortlist_from_result(result)
+                    llm_shortlist = save_shortlist_from_result(result, llm=crew_llm, verbose=args.verbose)
                     valid_llm = [j for j in llm_shortlist if is_valid_job_url(j.get("url", ""), BLACKLIST_JSON)]
                     if valid_llm:
                         shortlist = valid_llm
@@ -658,7 +851,7 @@ def main():
                         })
                     if not shortlist:
                         log_warning("No search result URLs available — falling back to LLM shortlist.")
-                        shortlist = save_shortlist_from_result(result)
+                        shortlist = save_shortlist_from_result(result, llm=crew_llm, verbose=args.verbose)
                     else:
                         ensure_output_dir()
                         with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
@@ -666,13 +859,16 @@ def main():
                         log_success(f"Using {len(shortlist)} search result URLs for packages.")
         else:
             log_warning("\nNo search result URLs found to crawl. Falling back to shortlist.")
-            shortlist = save_shortlist_from_result(result)
+            shortlist = save_shortlist_from_result(result, llm=crew_llm, verbose=args.verbose)
 
         if args.dry_run:
             log_info(f"Would create {len(shortlist)} review packages", args.verbose)
             return
 
-        save_packages_from_shortlist(shortlist, args.resume, resume_profile.source_hash, args.verbose, verify=verify_shortlist)
+        save_packages_from_shortlist(
+            shortlist, args.resume, resume_profile.source_hash, args.verbose,
+            verify=verify_shortlist,
+        )
         log_success("Review packages created successfully")
     elif args.apply_existing:
         log_info(f"Using saved application packages from {PACKAGES_JSON}; no new search will run.", args.verbose)
@@ -687,7 +883,11 @@ def main():
         if not approved:
             raise ValueError("The selected package does not exist or is not approved.")
     elif args.search or args.apply_existing:
-        approved = approval_gate(max_applications=args.max_applications, skip_review=args.skip_review, verbose=args.verbose)
+        approved = approval_gate(
+            max_applications=args.max_applications,
+            skip_review=args.skip_review,
+            verbose=args.verbose,
+        )
     else:
         approved = []
 
@@ -716,9 +916,14 @@ def main():
                     failed += 1
                     log_error(f"Skipping to next package after error: {exc}", args.verbose)
             else:
-                log_info(f"Skipping {job.get('title', 'Untitled')} — Playwright disabled; approved package left as-is.", args.verbose)
+                log_info(
+                    f"Skipping {job.get('title', 'Untitled')} — Playwright disabled; "
+                    "approved package left as-is.",
+                    args.verbose,
+                )
         if args.playwright and not args.dry_run:
-            log_info(f"Apply run complete: {applied} processed, {failed} failed, {len(approved) - applied - failed} skipped.")
+            skipped = len(approved) - applied - failed
+            log_info(f"Apply run complete: {applied} processed, {failed} failed, {skipped} skipped.")
     elif args.search or args.apply_existing or args.job_id:
         log_warning("No applications were approved. Browser automation will not start.")
 

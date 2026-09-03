@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from job_automation.config import load_config
 
 

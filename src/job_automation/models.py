@@ -50,6 +50,7 @@ class ApplicationPackage:
     answers: dict[str, str] = field(default_factory=dict)
     status: str = "draft"
     notes: str = ""
+    tailored_resume: str = ""
     created_at: str = ""
 
     def __post_init__(self) -> None:

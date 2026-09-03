@@ -49,6 +49,13 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 # Generate a cover letter for an approved package (the dashboard does this for you)
 .venv/bin/python crew.py --generate-cover JOB_ID
 
+# Generate a per-job tailored resume for an approved package
+.venv/bin/python crew.py --generate-resume JOB_ID
+
+# Lint and type-check
+.venv/bin/ruff check .
+.venv/bin/mypy src/job_automation crawler.py events.py cli_ui.py monitor.py playwright_sites.py report_weekly.py crew.py applier.py dashboard.py dashboard_app
+
 # Open the review queue and tracking dashboard
 .venv/bin/streamlit run dashboard.py
 
@@ -73,6 +80,7 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 | `--location` | str | `Remote` | Target location |
 | `--search` | flag | false | Run CrewAI search, crawl listings, create packages |
 | `--generate-cover JOB_ID` | str | — | Generate cover letter for an approved package |
+| `--generate-resume JOB_ID` | str | — | Generate a per-job tailored resume for an approved package |
 | `--add-package URL` | str | — | Manually add a job package from a URL |
 | `--title` | str | `Untitled` | Job title (with `--add-package`) |
 | `--company` | str | `Unknown` | Company name (with `--add-package`) |

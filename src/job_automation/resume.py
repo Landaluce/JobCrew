@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Any
-import hashlib
 from pathlib import Path
 
 from .models import ResumeProfile
