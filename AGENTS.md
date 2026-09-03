@@ -85,7 +85,6 @@ AI-powered job-search and application tool using CrewAI agents, Playwright brows
 - Dashboard runs subprocess calls to `crew.py` for search/apply/cover-letter/tailored-resume generation.
 - `application_packages.json` entries may carry `tailored_resume` (per-job resume text; also mirrored to `output/tailored_resumes/<job_id>.txt`, and rendered to `<job_id>_tailored.pdf` for upload at apply time). Rows may carry `updated_at` for last-writer-wins merge resolution.
 - The sidebar health panel (`dashboard_app/health.py`) checks LLM reachability, the resume file, and Playwright before you run anything; `crew.py` also fails fast when the LLM server is down (never on `--dry-run`).
-- The Submitted tab nudges applications older than 7 days with no logged response; logging a `follow-up` event (or interview/offer/rejected/withdrawn) stops the nudge.
 - All output under `output/` is git-ignored. `.env` and `.env.*` are also git-ignored.
 
 ## Gotchas
@@ -97,7 +96,7 @@ AI-powered job-search and application tool using CrewAI agents, Playwright brows
 - `application_packages.json` is both read by the dashboard and written by `crew.py` — never edit it by hand while the dashboard is open. Dashboard saves and the crew.py apply run merge into the current file (`save_packages(..., merge_existing=True)`) instead of replacing it, resolving per-row conflicts by `updated_at`; search-shortlist saves still replace the file (fresh queue each search).
 - History `replace()` writes atomically via a `.tmp` file, but the dashboard reads with a 15s cache (`st.cache_data`).
 - The Playwright apply flow uses `input()` for review-mode prompts — it cannot run inside Streamlit directly; it opens a separate terminal via `launch_in_terminal()`.
-- Tests cover the `src/job_automation/` library plus pure logic extracted from `crawler.py` (URL matching/domain checks), `crew.py` (shortlist recovery), `playwright_sites.py` (handler selection), `dashboard_app/rows.py` (funnel + follow-up row builders), `monitor.py`/`report_weekly.py` (reporting), and `dashboard_app/health.py` (reachability checks) — no browser, LLM, or Streamlit runtime needed. Root-level modules are importable from tests via the root `conftest.py`.
+- Tests cover the `src/job_automation/` library plus pure logic extracted from `crawler.py` (URL matching/domain checks), `crew.py` (shortlist recovery), `playwright_sites.py` (handler selection), `dashboard_app/rows.py` (funnel row builders), `monitor.py`/`report_weekly.py` (reporting), and `dashboard_app/health.py` (reachability checks) — no browser, LLM, or Streamlit runtime needed. Root-level modules are importable from tests via the root `conftest.py`.
 
 ## Environment
 

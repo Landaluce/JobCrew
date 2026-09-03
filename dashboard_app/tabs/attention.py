@@ -14,7 +14,7 @@ from job_automation.history import VALID_STATUSES
 
 def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> None:
     rows = attention_rows(history)
-    st.caption("Includes failed automation and draft packages awaiting review.")
+    st.caption("Failed/error automation events that need a human decision.")
     if not rows:
         st.success("Nothing needs attention right now.")
         return
@@ -29,12 +29,6 @@ def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> Non
             "status": st.column_config.TextColumn("Status", help="Current application status"),
         },
     )
-    for row in rows:
-        st.markdown(
-            f"{row['company']} — {row['title']} (score: {row.get('score', 'n/a')}): "
-            f"{common.status_badge(row['status'])}",
-            unsafe_allow_html=True,
-        )
 
     selected = st.selectbox(
         "Edit an attention item",
