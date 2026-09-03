@@ -1,5 +1,6 @@
 """Tests for ATS handler selection; browser interaction is not exercised here."""
 
+import applier
 import playwright_sites
 
 
@@ -35,3 +36,10 @@ def test_url_case_is_ignored() -> None:
         playwright_sites.pick_handler("HTTPS://BOARDS.GREENHOUSE.IO/ACME/JOBS/42")
         is playwright_sites.greenhouse_handler
     )
+
+
+def test_site_name_derived_from_handler() -> None:
+    assert applier._site_name(playwright_sites.lever_handler) == "lever"
+    assert applier._site_name(playwright_sites.workday_handler) == "workday"
+    assert applier._site_name(playwright_sites.greenhouse_handler) == "greenhouse"
+    assert applier._site_name(playwright_sites.ashby_handler) == "ashby"

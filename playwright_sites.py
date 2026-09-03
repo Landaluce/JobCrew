@@ -74,6 +74,35 @@ def greenhouse_handler(
     _fill_cover_letter(target, cover_letter)
 
 
+def _reveal_lever_form(page: Page) -> None:
+    """Open Lever's application form.
+
+    Modern Lever postings render the posting page without any form fields;
+    the file input and textarea only exist once the "APPLY FOR THIS JOB"
+    link (which points at ``<posting>/apply``) has been opened. This helper
+    is a no-op when the form is already present.
+    """
+    if page.locator('input[type="file"]').count():
+        return
+    apply_link = page.locator("a[href$='/apply']").first
+    if apply_link.count():
+        try:
+            apply_link.click(timeout=10_000)
+            page.wait_for_timeout(3_000)
+            return
+        except Exception:
+            pass
+    # Anchor is missing or a redirect happened; go straight to the apply URL.
+    current = page.url or ""
+    if current.endswith("/apply"):
+        return
+    try:
+        page.goto(current.rstrip("/") + "/apply", wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(2_000)
+    except Exception:
+        pass
+
+
 def lever_handler(
     page: Page,
     job: dict[str, Any],
@@ -82,16 +111,17 @@ def lever_handler(
 ) -> None:
     """Lever posting pages; never submits an application.
 
-    Lever application forms live directly on the posting page (sometimes in
-    the main frame, sometimes inside the jobs board iframe). The handler
-    probes both for the resume file input and a cover-letter textarea.
+    Lever's application form is only present on the ``<posting>/apply`` page
+    (reached by clicking "APPLY FOR THIS JOB"), so the handler reveals the
+    form first, then uploads the resume and fills a cover-letter textarea in
+    the main frame or an embedded jobs-board iframe.
     """
+    _reveal_lever_form(page)
     _upload_resume(page, resume_path)
     if not _fill_cover_letter(page, cover_letter):
         for frame in page.frames:
             if frame != page.main_frame and _fill_cover_letter(frame, cover_letter):
                 break
-    # Some Lever postings nest the whole application form in an iframe.
     for frame in page.frames:
         if frame != page.main_frame:
             _upload_resume(frame, resume_path)

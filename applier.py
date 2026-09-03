@@ -15,6 +15,14 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 
+def _site_name(handler: Any) -> str:
+    """Human-readable ATS name from a handler function, e.g. lever_handler -> lever."""
+    name = getattr(handler, "__name__", "") or ""
+    if name.endswith("_handler"):
+        return name[: -len("_handler")]
+    return name
+
+
 def apply_with_playwright(
     job: dict[str, Any],
     resume_path: str,
@@ -87,6 +95,7 @@ def apply_with_playwright(
             handler = pick_handler(job["url"]) if pick_handler else None
             if handler:
                 handler(page, job, resume_path, cover_letter)
+                details["site"] = _site_name(handler)
                 details["steps"].append("handler_executed")
             else:
                 if page.locator('input[type="file"]').count():
