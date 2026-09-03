@@ -36,9 +36,15 @@ def _log_status_change(job: dict[str, Any], previous: str, new: str) -> None:
 
 
 def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> None:
-    approved_packages = [package for package in packages if package.get("status") == "approved"]
-    st.caption("Approved packages ready for the browser application flow. You can still edit or return one to draft.")
-    if not approved_packages:
+    # "prepared" packages stay here so they can still be reopened or marked
+    # submitted; only never-started (approved) packages are offered for batch apply.
+    display_packages = [package for package in packages if package.get("status") in {"approved", "prepared"}]
+    approved_packages = [package for package in display_packages if package.get("status") == "approved"]
+    st.caption(
+        "Approved and prepared packages for the browser application flow. "
+        "You can still edit, reopen, or return one to draft."
+    )
+    if not display_packages:
         st.info("No approved packages are ready to apply.")
         return
 
@@ -67,7 +73,7 @@ def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> Non
 
     st.divider()
     status_options = _status_options()
-    for idx, package in enumerate(approved_packages):
+    for idx, package in enumerate(display_packages):
         job = package["job"]
         with st.container(border=True):
             st.markdown(

@@ -167,6 +167,9 @@ def apply_with_playwright(
 
             browser.close()
 
+        # Surface the final status so callers can advance the package
+        # (draft → approved → prepared → submitted) to match reality.
+        details["status"] = status
         log_event(status, job, details)
         log_success(f"Application status: {status}", verbose)
         return details

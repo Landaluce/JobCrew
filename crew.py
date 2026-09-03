@@ -894,6 +894,12 @@ def main():
     if approved:
         applied = 0
         failed = 0
+        # Packages are advanced (approved → prepared/submitted) after each
+        # successful browser run; snapshot the file so non-approved packages
+        # survive the write.
+        changed = False
+        packages_all = load_packages(PACKAGES_JSON) if (args.playwright and not args.dry_run) else []
+        by_job_id = {package.get("job_id"): package for package in packages_all}
         for package in approved:
             job = package["job"]
             if args.playwright:
@@ -901,7 +907,7 @@ def main():
                     log_info(f"Would apply to: {job.get('title')} @ {job.get('company')}", args.verbose)
                     continue
                 try:
-                    apply_with_playwright(
+                    result = apply_with_playwright(
                         job,
                         package.get("resume_path") or args.resume,
                         package["cover_letter"],
@@ -910,6 +916,12 @@ def main():
                         verbose=args.verbose,
                     )
                     applied += 1
+                    final_status = result.get("status")
+                    if final_status in {"prepared", "submitted"}:
+                        target = by_job_id.get(package.get("job_id"))
+                        if target is not None:
+                            target["status"] = final_status
+                            changed = True
                 except Exception as exc:
                     # One broken application must not abort the remaining batch;
                     # the failure was already logged to history by the apply flow.
@@ -921,6 +933,8 @@ def main():
                     "approved package left as-is.",
                     args.verbose,
                 )
+        if changed:
+            save_packages(packages_all, PACKAGES_JSON)
         if args.playwright and not args.dry_run:
             skipped = len(approved) - applied - failed
             log_info(f"Apply run complete: {applied} processed, {failed} failed, {skipped} skipped.")
