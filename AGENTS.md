@@ -61,6 +61,11 @@ A bare invocation (resume/query/location with no run-mode flag) implies `--searc
 .venv/bin/python crew.py --generate-cover JOB_ID
 ```
 
+### Generate cover letters for all approved packages missing one
+```bash
+.venv/bin/python crew.py --generate-cover-all
+```
+
 ### Generate a per-job tailored resume for one package
 ```bash
 .venv/bin/python crew.py --generate-resume JOB_ID

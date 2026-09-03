@@ -86,6 +86,9 @@ def get_help_examples():
   {Colors.CYAN}# Generate cover letter for a specific approved package{Colors.RESET}
   python crew.py --generate-cover JOB_ID
 
+  {Colors.CYAN}# Generate cover letters for all approved packages missing one{Colors.RESET}
+  python crew.py --generate-cover-all
+
   {Colors.CYAN}# Generate a per-job tailored resume for an approved package{Colors.RESET}
   python crew.py --generate-resume JOB_ID
 
@@ -154,8 +157,8 @@ def default_run_mode(args: argparse.Namespace) -> argparse.Namespace:
     flag, so a bare ``--resume/--query/--location`` invocation must search.
     """
     modes = (
-        args.search, args.apply_existing, args.generate_cover, args.generate_resume,
-        args.add_package, args.full_cycle, args.job_id,
+        args.search, args.apply_existing, args.generate_cover, args.generate_cover_all,
+        args.generate_resume, args.add_package, args.full_cycle, args.job_id,
     )
     if not any(modes):
         args.search = True
@@ -399,6 +402,34 @@ def generate_cover_for_saved_package(package_id: str, resume_text: str, verbose:
     log_success("Cover letter generated and saved.", verbose)
 
 
+def generate_covers_for_approved(
+    resume_text: str, verbose: bool = False, force: bool = False
+) -> int:
+    """Generate cover letters for every approved package that lacks one.
+
+    Packages that already have a cover letter (or are not approved) are left
+    untouched unless ``force``. Returns the number of letters generated.
+    """
+    packages = load_packages(PACKAGES_JSON)
+    targets = [
+        package for package in packages
+        if package.get("status") == "approved"
+        and (force or not package.get("cover_letter"))
+    ]
+    if not targets:
+        log_info("All approved packages already have cover letters.", verbose)
+        return 0
+    llm = create_llm()
+    spinner = Spinner(f"Generating {len(targets)} cover letters...", verbose)
+    spinner.start()
+    for package in targets:
+        package["cover_letter"] = generate_cover_letter(package["job"], resume_text, llm)
+    save_packages(packages, PACKAGES_JSON)
+    spinner.stop(True, f"Generated {len(targets)} cover letters")
+    log_success(f"Generated {len(targets)} cover letters.", verbose)
+    return len(targets)
+
+
 def generate_resume_for_saved_package(package_id: str, resume_text: str, verbose: bool = False) -> Path:
     """Generate a per-job tailored resume for an approved package.
 
@@ -531,6 +562,11 @@ def main():
         help="Generate a letter for one approved saved package",
     )
     run_group.add_argument(
+        "--generate-cover-all",
+        action="store_true",
+        help="Generate cover letters for all approved packages that do not have one yet",
+    )
+    run_group.add_argument(
         "--generate-resume", metavar="JOB_ID",
         help="Generate a per-job tailored resume for one approved saved package",
     )
@@ -602,7 +638,7 @@ def main():
     # Search is LLM-independent (Serper + crawl) and applies/deep scoring
     # degrade gracefully, so those still work offline.
     if not args.dry_run and (
-        args.generate_cover or args.generate_resume
+        args.generate_cover or args.generate_cover_all or args.generate_resume
     ) and not llm_server_online():
         log_error("The LLM server (Ollama) is not reachable.")
         log_error("Check OLLAMA_BASE_URL in .env and start Ollama with: ollama serve")
@@ -616,6 +652,13 @@ def main():
             log_info(f"Would generate cover letter for package: {args.generate_cover}", args.verbose)
             return
         generate_cover_for_saved_package(args.generate_cover, resume_profile.data["text"], args.verbose)
+        return
+
+    if args.generate_cover_all:
+        if args.dry_run:
+            log_info("Would generate cover letters for approved packages missing one", args.verbose)
+            return
+        generate_covers_for_approved(resume_profile.data["text"], args.verbose)
         return
 
     if args.generate_resume:

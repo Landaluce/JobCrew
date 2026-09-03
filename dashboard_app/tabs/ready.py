@@ -48,6 +48,31 @@ def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> Non
         st.info("No approved packages are ready to apply.")
         return
 
+    missing_letters = [p for p in approved_packages if not p.get("cover_letter")]
+    cover_col, button_col = st.columns([3, 1])
+    with cover_col:
+        st.caption(
+            f"{len(missing_letters)} approved package(s) still need a cover letter. "
+            "Generate them all at once, then edit each one below."
+        )
+    with button_col:
+        if st.button(
+            "Batch generate cover letters",
+            key="batch-gen-covers",
+            icon=":material/auto_awesome:",
+            disabled=not missing_letters,
+            help="Generate cover letters for all approved packages without one (LLM)",
+        ):
+            with st.spinner(
+                "Generating cover letters… roughly a minute per package."
+            ):
+                success, output = common.run_project_command(["crew.py", "--generate-cover-all"])
+            (st.success if success else st.error)(
+                output or "Batch cover-letter command finished."
+            )
+            if success:
+                st.rerun()
+
     batch_auto_submit = st.checkbox(
         "Auto-submit for batch apply",
         key="batch-auto-submit",
