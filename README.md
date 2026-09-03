@@ -14,16 +14,17 @@ cp .env.example .env  # or create .env with your local LLM/search settings
 .venv/bin/python crew.py --resume data/resume.pdf --query "Python developer" --location Remote
 ```
 
-The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OLLAMA_BASE_URL` in `.env`. To enable web search with CrewAI, configure the provider credentials required by `SerperDevTool`; without them, the workflow can still run with the tools available to CrewAI.
+The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OLLAMA_BASE_URL` in `.env`. Job search queries the **Serper** API directly (`SERPER_API_KEY` in `.env` — free tier at serper.dev) so every listing URL is a real Google result; the LLM is only used later for optional fit scores and generated cover letters/tailored resumes.
 
 ## Workflow
 
 1. Resume text is extracted and cached by SHA-256 hash.
-2. Agents search and rank roles using explicit task context.
-3. A structured shortlist and `output/application_packages.json` are written. Every package includes the job, rationale, resume hash, notes, and review status.
-4. Review and approve packages in the dashboard. Generate a tailored cover letter only after approval, from the **Ready to apply** tab.
-5. Optional Playwright assistance uploads the resume and fills a cover letter. It opens a visible browser and does not submit unless `--auto-submit` is specified.
-6. Application events are stored in `output/application_history.json`; use the dashboard and weekly report to track them.
+2. A Serper web search returns real job listing/search-result URLs.
+3. A Playwright crawl extracts individual job postings from those pages (skipping dead, parked, and blacklisted ones), optionally scored for fit by the LLM.
+4. `output/application_packages.json` is written. Every package includes the job, resume hash, notes, and review status.
+5. Review and approve packages in the dashboard. Generate a tailored cover letter only after approval, from the **Ready to apply** tab.
+6. Optional Playwright assistance uploads the resume and fills a cover letter. It opens a visible browser and does not submit unless `--auto-submit` is specified.
+7. Application events are stored in `output/application_history.json`; use the dashboard and weekly report to track them.
 
 ## Commands
 
@@ -31,7 +32,8 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 # Show all options
 .venv/bin/python crew.py -h
 
-# Create reviewable packages (safe default; no browser automation)
+# Create reviewable packages (safe default; no browser automation).
+# A bare --resume/--query/--location invocation implies --search (no run-mode flag = search).
 .venv/bin/python crew.py --resume data/resume.pdf --query "backend engineer" --location Remote
 
 # Limit listing pages crawled (defaults: 8 total, 2 per domain)
@@ -78,7 +80,7 @@ The default LLM configuration uses Ollama. Set `OLLAMA_MODEL` and optionally `OL
 | `--resume` | path | `data/resume.pdf` | Resume PDF/TXT/MD path |
 | `--query` | str | `python developer remote` | Job search query |
 | `--location` | str | `Remote` | Target location |
-| `--search` | flag | false | Run CrewAI search, crawl listings, create packages |
+| `--search` | flag | false | Search Serper, crawl listings, create packages (implied when no run-mode flag is given) |
 | `--generate-cover JOB_ID` | str | — | Generate cover letter for an approved package |
 | `--generate-resume JOB_ID` | str | — | Generate a per-job tailored resume for an approved package |
 | `--add-package URL` | str | — | Manually add a job package from a URL |
@@ -115,8 +117,8 @@ History uses defined lifecycle statuses: `draft`, `approved`, `prepared`, `submi
 
 ## Project layout
 
-- `src/job_automation/` — reusable resume, identity, package, history, and listing-selection primitives.
-- `crew.py` — CLI entrypoint: CrewAI agent workflow, approval gate, shortlist/package creation, and `--add-package` for manual entry.
+- `src/job_automation/` — reusable resume, identity, package, history, listing-selection, and Serper-client primitives.
+- `crew.py` — CLI entrypoint: Serper search → crawl → package creation, approval gate, LLM content generation, and `--add-package` for manual entry.
 - `crawler.py` — listing-page crawling with pre-crawl liveness checks and blacklist persistence, plus job-URL extraction.
 - `applier.py` — the Playwright apply flow (resume upload, cover-letter fill, opt-in submit).
 - `cli_ui.py` / `events.py` — terminal UI helpers and history/CSV event logging.

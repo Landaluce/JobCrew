@@ -7,6 +7,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from applier import apply_with_playwright
 from cli_ui import Colors, Spinner, log_error, log_info, log_success, log_warning
@@ -16,12 +17,12 @@ from job_automation import (
     job_id,
     load_config,
     load_or_parse_resume,
-    recover_jobs_from_text,
 )
 from job_automation.listings import MAX_LISTING_PAGES, MAX_PAGES_PER_DOMAIN
 from job_automation.llm import llm_server_online
 from job_automation.packages import load_packages, save_packages
 from job_automation.resume_render import render_resume_pdf, tailored_pdf_path
+from job_automation.serper import serper_search
 
 # crewai/pydantic are heavy and must stay optional at import time: the CLI
 # (help text, apply-only runs, dashboard launches) must work even when they
@@ -53,17 +54,6 @@ class _UnavailableModel:
 
 if BaseModel is not None:
 
-    class JobItem(BaseModel):
-        title: str
-        company: str
-        location: str
-        url: str
-        score: float
-        rationale: str
-
-    class JobList(BaseModel):
-        jobs: list[JobItem]
-
     class CoverLetterResult(BaseModel):
         cover_letter: str
 
@@ -71,8 +61,6 @@ if BaseModel is not None:
         tailored_resume: str
 
 else:  # pragma: no cover - exercised only without pydantic installed
-    JobItem = _UnavailableModel  # type: ignore[misc,assignment]
-    JobList = _UnavailableModel  # type: ignore[misc,assignment]
     CoverLetterResult = _UnavailableModel  # type: ignore[misc,assignment]
     TailoredResumeResult = _UnavailableModel  # type: ignore[misc,assignment]
 
@@ -118,15 +106,13 @@ class CustomHelpFormatter(argparse.HelpFormatter):
         return help_text + get_help_examples()
 
 
-try:
-    from crewai_tools import SerperDevTool
-except ImportError:
-    SerperDevTool = None  # type: ignore[misc,assignment]
-
 SHORTLIST_JSON = "output/shortlist.json"
 PACKAGES_JSON = "output/application_packages.json"
 RESUME_CACHE = "output/resume_profile.json"
 BLACKLIST_JSON = "output/blacklist.json"
+# Cap on review packages created from one crawl (the full crawl is kept in
+# shortlist.json) so a big crawl does not flood the review queue.
+MAX_QUEUE_PACKAGES = 25
 
 
 def create_llm() -> Any:
@@ -161,84 +147,19 @@ def was_already_applied(job: dict[str, Any]) -> bool:
     return False
 
 
-def find_shortlist_in_result(result) -> list[dict]:
-    """Recover a job shortlist from a finished crew run.
+def default_run_mode(args: argparse.Namespace) -> argparse.Namespace:
+    """When no run mode is given, default to a search instead of a silent no-op.
 
-    Tries, in order: the structured ``JobList`` pydantic output of any task,
-    then raw-text recovery (local models sometimes return fenced or slightly
-    malformed JSON that CrewAI could not coerce into the schema).
+    README/AGENTS.md document the search command without an explicit ``--search``
+    flag, so a bare ``--resume/--query/--location`` invocation must search.
     """
-    for task_output in result.tasks_output:
-        pydantic_output = getattr(task_output, "pydantic", None)
-        if isinstance(pydantic_output, JobList):
-            return [job.model_dump() for job in pydantic_output.jobs]
-
-    for task_output in result.tasks_output:
-        raw = getattr(task_output, "raw", "")
-        recovered = recover_jobs_from_text(raw)
-        if recovered:
-            return recovered
-    return []
-
-
-def _repair_shortlist_text(raw_text: str, llm: Any) -> list[dict]:
-    """Ask the LLM to reformat a malformed shortlist payload into clean JSON."""
-    try:
-        reply = str(llm.call(
-            "The text below is a job shortlist that a previous model turn "
-            "returned without valid JSON. Reformat it into EXACTLY this JSON "
-            "shape and reply with nothing else:\n"
-            '{"jobs": [{"title": "...", "company": "...", "location": "...", '
-            '"url": "...", "score": 0, "rationale": "..."}]}\n\n'
-            f"Raw text:\n{raw_text[:12000]}"
-        ))
-        return recover_jobs_from_text(reply)
-    except Exception as exc:
-        log_warning(f"Shortlist repair failed: {exc}")
-        return []
-
-
-def save_shortlist_from_result(result, llm: Any = None, verbose: bool = False) -> list[dict]:
-    """Find the ranked-job shortlist from a crew run and persist it.
-
-    The primary source is the structured ``JobList`` pydantic output of the
-    ranking task. When that is missing (common with small local models that
-    return fenced or malformed JSON), the raw task text is parsed with
-    tolerant JSON recovery; if that also fails and an ``llm`` is available,
-    one repair pass asks the model to reformat its own output.
-
-    Do not use result.json here: CrewOutput represents the final task output,
-    which is raw text rather than JSON.
-    """
-    ensure_output_dir()
-    shortlist = find_shortlist_in_result(result)
-
-    if not shortlist and llm is not None:
-        raw_parts = [
-            getattr(task_output, "raw", "")
-            for task_output in result.tasks_output
-            if isinstance(getattr(task_output, "raw", ""), str)
-        ]
-        raw_text = "\n".join(raw_parts)
-        if raw_text.strip():
-            log_warning("No structured shortlist found — asking the model to repair its JSON output.", verbose)
-            shortlist = _repair_shortlist_text(raw_text, llm)
-            if shortlist:
-                log_success(f"Recovered {len(shortlist)} jobs via repair pass.", verbose)
-
-    if not shortlist:
-        raise RuntimeError(
-            "Could not find a structured JobList from rank_task, and raw-text "
-            "recovery found nothing usable. Check the Job Ranking Agent output "
-            "in output/crew_result.txt; smaller local models often need "
-            "OLLAMA_MODEL upgraded or a JSON-capable model for reliable output."
-        )
-
-    with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
-        json.dump(shortlist, f, indent=2, ensure_ascii=False)
-
-    print(f"Saved {len(shortlist)} ranked jobs to {SHORTLIST_JSON}")
-    return shortlist
+    modes = (
+        args.search, args.apply_existing, args.generate_cover, args.generate_resume,
+        args.add_package, args.full_cycle, args.job_id,
+    )
+    if not any(modes):
+        args.search = True
+    return args
 
 
 def _fetch_page_text(url: str, max_chars: int = 6000) -> str:
@@ -330,6 +251,79 @@ def save_packages_from_shortlist(
     save_packages(packages, PACKAGES_JSON)
     log_success(f"Saved {len(packages)} review packages to {PACKAGES_JSON}", verbose)
     return packages
+
+
+def search_job_listings(
+    query: str, location: str, max_results: int = 10, verbose: bool = False
+) -> list[dict[str, Any]]:
+    """Real job listing/search-result URLs straight from the Serper API.
+
+    This replaces the crewai search agent: local models emit tool calls that
+    crewai never executes (the call becomes the agent's final answer), so the
+    agent fabricated listing URLs. Serper results are real Google organic
+    links; invalid and blacklisted URLs are filtered out here.
+    """
+    if not query.strip():
+        log_error("Search query is empty.", verbose)
+        return []
+    location_part = (
+        location.strip()
+        if location and location.strip().lower() != "remote"
+        else "remote"
+    )
+    search_query = f"{query.strip()} {location_part} jobs"
+    log_info(f"Serper query: {search_query!r}", verbose)
+
+    results = serper_search(search_query, num=max_results)
+
+    listings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in results:
+        url = (item.get("link") or "").strip()
+        if not url or url in seen:
+            continue
+        if not is_valid_job_url(url, BLACKLIST_JSON):
+            log_warning(f"Skipping invalid/blacklisted listing URL: {url}", verbose)
+            continue
+        seen.add(url)
+        hostname = urlparse(url).netloc.lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        listings.append({
+            "url": url,
+            "title": item.get("title") or "Untitled",
+            "company": hostname or "Unknown",
+            "location": location or "",
+            "source": "serper",
+        })
+    return listings
+
+
+def _score_crawled_jobs(
+    jobs: list[dict[str, Any]], resume_text: str, verbose: bool = False
+) -> None:
+    """Best-effort per-job LLM fit scores for crawled postings.
+
+    Scoring is bounded so a large crawl (100+ postings) does not stall the
+    queue on hundreds of LLM calls; the dashboard sorts by score and the
+    approval gate caps applications anyway. Search itself never requires the
+    LLM — scoring only runs when Ollama is up and fails gracefully otherwise
+    (packages are saved without a score).
+    """
+    max_to_score = 10
+    if not jobs or not llm_server_online():
+        return
+    scored_target = jobs[:max_to_score]
+    llm = create_llm()
+    spinner = Spinner(f"Scoring up to {len(scored_target)} jobs with the LLM...", verbose)
+    spinner.start()
+    scored = 0
+    for job in scored_target:
+        result = score_job_with_llm(job, resume_text, llm)
+        if result:
+            job["score"], job["rationale"] = result
+            scored += 1
+    spinner.stop(True, f"Scored {scored}/{len(scored_target)} jobs")
 
 
 def _structured_generation(prompt: str, schema: type, llm: Any) -> dict[str, Any]:
@@ -503,102 +497,6 @@ def approval_gate(
     return approved
 
 
-def build_crew(
-    resume_text: str,
-    resume_source: str,
-    resume_hash: str,
-    query: str,
-    location: str,
-    llm: Any = None,
-) -> Any:
-    from crewai import Agent, Crew, Process, Task
-
-    tools = []
-    if SerperDevTool is not None:
-        tools.append(SerperDevTool())
-
-    resume_agent = Agent(
-        role="Resume Parser",
-        goal="Extract structured candidate profile from the resume.",
-        backstory="You identify skills, experience, roles, and keywords from resumes.",
-        llm=llm,
-        verbose=True,
-    )
-
-    search_agent = Agent(
-        role="Job Search Agent",
-        goal="Find relevant jobs based on the candidate profile and search query.",
-        backstory="You search for roles that match the candidate's background and preferences.",
-        tools=tools,
-        llm=llm,
-        verbose=True,
-    )
-
-    rank_agent = Agent(
-        role="Job Ranking Agent",
-        goal="Score jobs against the resume and produce a shortlist.",
-        backstory="You compare role requirements with resume evidence and rank opportunities carefully.",
-        llm=llm,
-        verbose=True,
-    )
-
-    resume_task = Task(
-    description=f"""
-    Analyze the resume text below and extract a structured candidate profile.
-
-    Return skills, work experience, industries, education, target roles,
-    seniority, location preferences, and job-search keywords.
-
-    Resume source: {resume_source}
-    Resume SHA-256: {resume_hash}
-
-    Resume text:
-    {resume_text}
-    """,
-        expected_output="Structured candidate profile.",
-        agent=resume_agent,
-    )
-    search_task = Task(
-        description=(
-            f"Find relevant job listing pages for query '{query}' and location '{location}'. "
-            "Return listing page URLs (search result pages from job boards like "
-            "LinkedIn, Indeed, etc.), title, company, and location for each listing found."
-        ),
-        expected_output="List of job listing page URLs.",
-        agent=search_agent,
-    )
-
-    rank_task = Task(
-        description="""
-Rank the jobs and return JSON with this structure:
-{
-  "jobs": [
-    {
-      "title": "...",
-      "company": "...",
-      "location": "...",
-      "url": "...",
-      "score": 0,
-      "rationale": "..."
-    }
-  ]
-}
-Score each job from 0 to 100 by fit.
-""",
-        expected_output="JSON shortlist.",
-        agent=rank_agent,
-        context=[resume_task, search_task],
-        output_pydantic=JobList,
-    )
-
-    return Crew(
-        agents=[resume_agent, search_agent, rank_agent],
-        tasks=[resume_task, search_task, rank_task],
-        process=Process.sequential,
-        verbose=True,
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="CrewAI job search and application assistant",
@@ -675,6 +573,8 @@ def main():
         if not args.review:
             args.review = True
 
+    args = default_run_mode(args)
+
     ensure_output_dir()
 
     # Validate required files early
@@ -697,11 +597,12 @@ def main():
     log_success(f"Resume source: {resume_profile.source_file}", args.verbose)
     log_success(f"Resume SHA-256: {resume_profile.source_hash}", args.verbose)
 
-    # Fail fast when the LLM server is down instead of burning minutes in a
-    # CrewAI kickoff that dies with a connection error. Apply-only runs and
-    # --add-package (scoring degrades gracefully) still work offline.
+    # Fail fast when the LLM server is down for content generation instead of
+    # burning minutes in a CrewAI kickoff that dies with a connection error.
+    # Search is LLM-independent (Serper + crawl) and applies/deep scoring
+    # degrade gracefully, so those still work offline.
     if not args.dry_run and (
-        args.generate_cover or args.generate_resume or args.search
+        args.generate_cover or args.generate_resume
     ) and not llm_server_online():
         log_error("The LLM server (Ollama) is not reachable.")
         log_error("Check OLLAMA_BASE_URL in .env and start Ollama with: ollama serve")
@@ -753,129 +654,78 @@ def main():
         resume_text = resume_profile.data["text"]
         log_info(f"Resume characters loaded: {len(resume_text)}", args.verbose)
 
-        spinner = Spinner("Building CrewAI agents...", args.verbose)
-        spinner.start()
-        crew_llm = create_llm()
-        crew = build_crew(
-            resume_text=resume_text,
-            resume_source=resume_profile.source_file,
-            resume_hash=resume_profile.source_hash,
-            query=args.query,
-            location=args.location,
-            llm=crew_llm,
-        )
-        spinner.stop(True, "CrewAI agents ready")
-
         if args.dry_run:
-            log_info("Would run CrewAI search and create review packages", args.verbose)
-            return
-
-        try:
-            spinner = Spinner("Running CrewAI search (this may take a while)...", args.verbose)
-            spinner.start()
-            result = crew.kickoff()
-            spinner.stop(True, "CrewAI search complete")
-        except Exception as exc:
-            spinner.stop(False, "CrewAI search failed")
-            log_error(f"CrewAI kickoff failed: {exc}")
-            if "Connection refused" in str(exc) or "connect" in str(exc).lower():
-                log_error("Is Ollama running? Start it with: ollama serve")
-            elif "SerperDevTool" in str(exc):
-                log_error("Serper API key missing. Set SERPER_API_KEY in .env")
-            raise
-
-        with open("output/crew_result.txt", "w", encoding="utf-8") as f:
-            f.write(str(result))
-
-        # Extract search results (listing page URLs) from crew output
-        search_results = []
-        seen_urls: set[str] = set()
-        for task_output in result.tasks_output:
-            raw = getattr(task_output, "raw", "")
-            if not isinstance(raw, str):
-                continue
-            for match in re.finditer(r'https?://[^\s,)\]"\'">]+', raw):
-                url = match.group(0).rstrip(".,;:")
-                if url not in seen_urls:
-                    seen_urls.add(url)
-                    search_results.append({"url": url, "title": "", "company": "", "location": ""})
-
-        log_info(f"Found {len(search_results)} listing page URLs to crawl", args.verbose)
-
-        # Whether to HEAD-verify shortlist URLs (skip for search result fallbacks that block HEAD)
-        verify_shortlist = True
-        # Crawl listing pages to extract individual job posting URLs
-        if search_results:
-            crawled_jobs = crawl_all_listings(
-                search_results,
-                debug=args.debug,
-                verbose=args.verbose,
-                max_pages=args.max_listing_pages,
-                max_per_domain=args.max_pages_per_domain,
-                blacklist_path=BLACKLIST_JSON,
+            log_info(
+                "Would search Serper for job listings, crawl them, and create review packages",
+                args.verbose,
             )
-            if crawled_jobs:
-                shortlist = crawled_jobs
-                ensure_output_dir()
-                with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
-                    json.dump(shortlist, f, indent=2, ensure_ascii=False)
-                log_success(f"\nUsing {len(shortlist)} crawled individual job URLs for packages.")
-            else:
-                log_warning("\nCrawl returned no individual job URLs. Using search results directly.")
-                verify_shortlist = False
-                # Try LLM-ranked shortlist first (has titles/company), fallback to search_results URLs
-                shortlist = []
-                try:
-                    llm_shortlist = save_shortlist_from_result(result, llm=crew_llm, verbose=args.verbose)
-                    valid_llm = [j for j in llm_shortlist if is_valid_job_url(j.get("url", ""), BLACKLIST_JSON)]
-                    if valid_llm:
-                        shortlist = valid_llm
-                        log_success(f"Using {len(shortlist)} LLM-ranked jobs for packages.")
-                    else:
-                        log_warning("LLM shortlist contained only placeholder/filtered URLs — using Serper URLs.")
-                except Exception as exc:
-                    log_warning(f"Could not load LLM shortlist ({exc}) — using Serper URLs.")
-                if not shortlist:
-                    # Build from search_results; enrich with LLM titles where possible via URL map
-                    url_map = {}
-                    try:
-                        for t in result.tasks_output:
-                            pj = getattr(t, "pydantic", None)
-                            if isinstance(pj, JobList):
-                                for j in pj.jobs:
-                                    url_map[j.url] = j.model_dump()
-                                break
-                    except Exception:
-                        pass
-                    shortlist = []
-                    for s in search_results:
-                        url = s.get("url", "")
-                        if not url:
-                            continue
-                        enriched = url_map.get(url, {})
-                        shortlist.append({
-                            "title": enriched.get("title") or s.get("title", "") or "Untitled",
-                            "company": enriched.get("company") or s.get("company", "") or "Unknown",
-                            "location": enriched.get("location") or s.get("location", ""),
-                            "url": url,
-                            "score": enriched.get("score", 75.0),
-                            "rationale": enriched.get("rationale", ""),
-                        })
-                    if not shortlist:
-                        log_warning("No search result URLs available — falling back to LLM shortlist.")
-                        shortlist = save_shortlist_from_result(result, llm=crew_llm, verbose=args.verbose)
-                    else:
-                        ensure_output_dir()
-                        with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
-                            json.dump(shortlist, f, indent=2, ensure_ascii=False)
-                        log_success(f"Using {len(shortlist)} search result URLs for packages.")
-        else:
-            log_warning("\nNo search result URLs found to crawl. Falling back to shortlist.")
-            shortlist = save_shortlist_from_result(result, llm=crew_llm, verbose=args.verbose)
-
-        if args.dry_run:
-            log_info(f"Would create {len(shortlist)} review packages", args.verbose)
             return
+
+        # Listing URLs come straight from the Serper API (real Google results),
+        # not from an agent: local models can't drive crewai tool calls, so the
+        # agent-based search step fabricated URLs. Downstream of this point the
+        # pipeline is deterministic and only ever sees real, reachable pages.
+        search_results = search_job_listings(
+            args.query, args.location, args.max_listing_pages, args.verbose
+        )
+        if not search_results:
+            log_error(
+                "Search returned no usable job listing URLs. "
+                "Check SERPER_API_KEY in .env and that the query is not blacklisted."
+            )
+            raise SystemExit(1)
+        log_info(f"Found {len(search_results)} real listing page URLs to crawl", args.verbose)
+
+        crawled_jobs = crawl_all_listings(
+            search_results,
+            debug=args.debug,
+            verbose=args.verbose,
+            max_pages=args.max_listing_pages,
+            max_per_domain=args.max_pages_per_domain,
+            blacklist_path=BLACKLIST_JSON,
+        )
+        verify_shortlist = True
+        if crawled_jobs:
+            # Persist the full crawl for reference, then trim the review queue
+            # to the best-scored subset so a large crawl does not flood it.
+            ensure_output_dir()
+            with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
+                json.dump(crawled_jobs, f, indent=2, ensure_ascii=False)
+            log_success(f"Saved {len(crawled_jobs)} crawled jobs to {SHORTLIST_JSON}", args.verbose)
+            _score_crawled_jobs(crawled_jobs, resume_text, args.verbose)
+            crawled_jobs.sort(
+                key=lambda job: job.get("score") if isinstance(job.get("score"), (int, float)) else 0,
+                reverse=True,
+            )
+            shortlist = crawled_jobs[:MAX_QUEUE_PACKAGES]
+            if len(crawled_jobs) > MAX_QUEUE_PACKAGES:
+                log_warning(
+                    f"Crawl found {len(crawled_jobs)} postings — keeping the top "
+                    f"{MAX_QUEUE_PACKAGES} by fit score for the review queue "
+                    f"(all of them remain in {SHORTLIST_JSON})."
+                )
+            log_success(f"Using {len(shortlist)} crawled individual job URLs for packages.")
+        else:
+            # No individual postings were extracted (JS-heavy/anti-bot board or a
+            # search-results page), but the Serper URLs themselves are real and
+            # reviewable — package them so the user still gets a queue.
+            log_warning(
+                "Crawl returned no individual job URLs — packaging the real listing "
+                "pages Serper found instead."
+            )
+            verify_shortlist = False
+            shortlist = [{
+                "title": s.get("title") or "Untitled",
+                "company": s.get("company") or "Unknown",
+                "location": s.get("location") or "",
+                "url": s["url"],
+                "score": 75.0,
+                "rationale": "Listing page — the crawler found no individual postings on it.",
+            } for s in search_results]
+            ensure_output_dir()
+            with open(SHORTLIST_JSON, "w", encoding="utf-8") as f:
+                json.dump(shortlist, f, indent=2, ensure_ascii=False)
+            log_success(f"Saved {len(shortlist)} shortlist entries to {SHORTLIST_JSON}", args.verbose)
 
         save_packages_from_shortlist(
             shortlist, args.resume, resume_profile.source_hash, args.verbose,

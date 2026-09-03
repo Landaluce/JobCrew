@@ -304,8 +304,13 @@ def crawl_all_listings(
 
         ok, reason = check_listing_url(listing_url)
         if not ok:
+            # Only permanently dead/absent pages earn a blacklist entry (so they
+            # are skipped instantly forever). HTTP 403/401/429 and timeouts are
+            # usually anti-bot walls or transient — skip this run, retry next.
+            permanent_failure = reason in {"parked", "http_404", "dns_error"}
             log_warning(f"\nSkipping unreachable listing page ({reason}): {listing_url}", verbose)
-            add_to_blacklist(blacklist_path, [listing_url])
+            if permanent_failure:
+                add_to_blacklist(blacklist_path, [listing_url])
             pages_skipped += 1
             continue
 

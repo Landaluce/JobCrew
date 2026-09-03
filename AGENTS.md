@@ -34,6 +34,8 @@ AI-powered job-search and application tool using CrewAI agents, Playwright brows
 .venv/bin/python crew.py --resume data/resume.pdf --query "python developer" --location Remote
 ```
 
+A bare invocation (resume/query/location with no run-mode flag) implies `--search`; passing `--search` explicitly is equivalent.
+
 ### Apply from saved packages (opens Chrome via Playwright)
 ```bash
 .venv/bin/python crew.py --apply-existing --playwright --review
@@ -68,8 +70,8 @@ AI-powered job-search and application tool using CrewAI agents, Playwright brows
 
 ## Architecture
 
-- `src/job_automation/` — installable library (resume parsing, history, identity, package statuses, shortlist JSON recovery, packages/dedupe, listings/blacklist). No heavy dependencies; tests live in `tests/`.
-- `crew.py` — CLI entrypoint: CrewAI agent workflow, approval gate, Playwright apply flow, listing-page crawl step, and per-job cover-letter/tailored-resume generation.
+- `src/job_automation/` — installable library (resume parsing, history, identity, package statuses, Serper client, packages/dedupe, listings/blacklist). No heavy dependencies; tests live in `tests/`.
+- `crew.py` — CLI entrypoint: Serper-backed job search, listing crawl, approval gate, Playwright apply flow, and per-job cover-letter/tailored-resume generation (the latter two use a one-agent CrewAI structured-generation task).
 - `dashboard.py` — thin Streamlit entry point (sidebar, metric-card navigation, tab dispatch). Per-tab rendering lives in `dashboard_app/` (`common.py` = shared helpers, `rows.py` = pure table-row builders, `tabs/` = one module per tab).
 - `playwright_sites.py` — site-specific form-filling handlers (Greenhouse, Lever, Workday, Ashby + generic fallback). Add new adapters here and register them in `pick_handler()`.
 - `monitor.py` — days-since-submission report. `report_weekly.py` — weekly metrics over a configurable window (Markdown + PDF).
@@ -84,19 +86,20 @@ AI-powered job-search and application tool using CrewAI agents, Playwright brows
 - Playwright launches Chrome (`channel="chrome"`) in headed mode with `slow_mo=250`.
 - Dashboard runs subprocess calls to `crew.py` for search/apply/cover-letter/tailored-resume generation.
 - `application_packages.json` entries may carry `tailored_resume` (per-job resume text; also mirrored to `output/tailored_resumes/<job_id>.txt`, and rendered to `<job_id>_tailored.pdf` for upload at apply time). Rows may carry `updated_at` for last-writer-wins merge resolution.
-- The sidebar health panel (`dashboard_app/health.py`) checks LLM reachability, the resume file, and Playwright before you run anything; `crew.py` also fails fast when the LLM server is down (never on `--dry-run`).
+- The sidebar health panel (`dashboard_app/health.py`) checks LLM reachability, the resume file, and Playwright before you run anything; `crew.py` fails fast when the LLM server is down for cover-letter/tailored-resume runs (search and apply degrade gracefully and never require it).
 - All output under `output/` is git-ignored. `.env` and `.env.*` are also git-ignored.
 
 ## Gotchas
 
-- `crew.py` lazy-imports `crewai`, `crewai-tools`, `pydantic`, and `python-dotenv`, and structured output schemas degrade to placeholders when pydantic is absent — the CLI (help, apply-only runs, dashboard launches) works without them; only the LLM features need them at runtime. `playwright` is also imported defensively (try/except) by `crawler.py`, `applier.py`, and (via `TYPE_CHECKING`) `playwright_sites.py`.
-- The default LLM is local Ollama (`llama3.2:3b`). If Ollama isn't running, CrewAI agent calls will fail.
-- The search agent returns listing/search page URLs, not individual job postings. A Playwright crawl step (`crawl_all_listings()`) visits each listing page and extracts individual job posting URLs using URL pattern matching before creating application packages.
-- The crawl runs in headless Chrome and scrolls pages to trigger lazy-loaded content. It extracts links matching patterns like `/jobs/view/`, `/job/\d+`, `greenhouse.io/jobs/`, and `lever.co/company/role`.
+- `crew.py` lazy-imports `crewai`, `pydantic`, and `python-dotenv`, and structured output schemas degrade to placeholders when pydantic is absent — the CLI (help, apply-only runs, dashboard launches) works without them; only the LLM features need them at runtime. `playwright` is also imported defensively (try/except) by `crawler.py`, `applier.py`, and (via `TYPE_CHECKING`) `playwright_sites.py`.
+- **Search never trusts the LLM for URLs.** Job discovery queries the Serper API directly (`src/job_automation/serper.py`) — local models emit tool calls that crewai never executes (the call becomes the agent's final answer), so the old agent-based search step fabricated URLs. Every listing URL that reaches the crawler is a real Google organic result.
+- A Playwright crawl step (`crawl_all_listings()`) visits each Serper listing page in headless Chrome, scrolls to trigger lazy-loaded content, and extracts individual job posting URLs using URL pattern matching (`/jobs/view/`, `/job/\d+`, `greenhouse.io/jobs/`, `lever.co/company/role`, Ashby, Workday) before creating application packages. Unreachable/blacklisted listing pages are skipped and added to the blacklist.
+- If the crawl finds no individual postings (JS-heavy or anti-bot boards), the real Serper listing URLs themselves become review packages instead of junk.
+- The default LLM is local Ollama (`OLLAMA_MODEL` in `.env`). The sidebar health panel and dashboard use `llm_server_online()`; cover-letter/tailored-resume runs fail fast when it is down.
 - `application_packages.json` is both read by the dashboard and written by `crew.py` — never edit it by hand while the dashboard is open. Dashboard saves and the crew.py apply run merge into the current file (`save_packages(..., merge_existing=True)`) instead of replacing it, resolving per-row conflicts by `updated_at`; search-shortlist saves still replace the file (fresh queue each search).
 - History `replace()` writes atomically via a `.tmp` file, but the dashboard reads with a 15s cache (`st.cache_data`).
 - The Playwright apply flow uses `input()` for review-mode prompts — it cannot run inside Streamlit directly; it opens a separate terminal via `launch_in_terminal()`.
-- Tests cover the `src/job_automation/` library plus pure logic extracted from `crawler.py` (URL matching/domain checks), `crew.py` (shortlist recovery), `playwright_sites.py` (handler selection), `dashboard_app/rows.py` (funnel row builders), `monitor.py`/`report_weekly.py` (reporting), and `dashboard_app/health.py` (reachability checks) — no browser, LLM, or Streamlit runtime needed. Root-level modules are importable from tests via the root `conftest.py`.
+- Tests cover the `src/job_automation/` library plus pure logic extracted from `crawler.py` (URL matching/domain checks), `crew.py` (run-mode defaulting, listing search), `serper.py`, `playwright_sites.py` (handler selection), `dashboard_app/rows.py` (funnel row builders), `monitor.py`/`report_weekly.py` (reporting), and `dashboard_app/health.py` (reachability checks) — no browser, LLM, or Streamlit runtime needed. Root-level modules are importable from tests via the root `conftest.py`.
 
 ## Environment
 
