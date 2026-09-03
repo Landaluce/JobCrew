@@ -35,9 +35,6 @@ def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> Non
             ),
         },
     )
-    st.caption("Status overview:")
-    for _, row in table.iterrows():
-        st.markdown(f"{row['company']} — {row['title']}: {common.status_badge(row['status'])}", unsafe_allow_html=True)
     if st.button("Save tracking changes", icon=":material/save:", help="Save all status changes"):
         for index, row in edited.iterrows():
             history[index]["status"] = row["status"]

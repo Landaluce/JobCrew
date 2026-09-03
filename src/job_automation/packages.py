@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -9,10 +10,80 @@ from .identity import job_id
 from .models import ApplicationPackage
 
 
-def save_packages(packages: Sequence[Any], path: str | Path) -> None:
+def _as_dicts(packages: Sequence[Any]) -> list[dict[str, Any]]:
+    return [item.to_dict() if isinstance(item, ApplicationPackage) else item for item in packages]
+
+
+def _without_timestamp(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key != "updated_at"}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def save_packages(
+    packages: Sequence[Any],
+    path: str | Path,
+    *,
+    merge_existing: bool = False,
+    removed_ids: Iterable[str] = (),
+) -> None:
+    """Write packages to ``path`` (atomically, via a .tmp rename).
+
+    Default (replace) semantics match the original behavior. With
+    ``merge_existing=True`` the current file is the base: rows already on disk
+    that are unchanged are kept byte-for-byte, changed rows are resolved
+    last-writer-wins by ``updated_at`` (a genuinely newer edit on disk beats a
+    stale in-memory copy), disk-only rows survive, and ``removed_ids`` are
+    deleted. This stops a whole-file rewrite from clobbering a concurrent
+    writer (dashboard edits vs. a crew.py run).
+    """
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = [item.to_dict() if isinstance(item, ApplicationPackage) else item for item in packages]
+    incoming = _as_dicts(packages)
+
+    if not merge_existing or not destination.exists():
+        payload = incoming
+    else:
+        existing = load_packages(destination)
+        removed = set(removed_ids)
+        merged: list[dict[str, Any]] = []
+        merged_by_id: dict[str, dict[str, Any]] = {}
+
+        def row_id(row: dict[str, Any]) -> str:
+            return str(row.get("job_id") or "")
+
+        def append(row: dict[str, Any]) -> None:
+            merged.append(row)
+            key = row_id(row)
+            if key:  # legacy rows without a job ID are kept but not mergeable
+                merged_by_id[key] = row
+
+        for row in existing:
+            if row_id(row) not in removed:
+                append(row)
+        for row in incoming:
+            key = row_id(row)
+            if key in removed:
+                continue
+            current = merged_by_id.get(key)
+            if current is None:
+                append(row)
+                continue
+            if _without_timestamp(current) == _without_timestamp(row):
+                continue  # unchanged copy — keep the on-disk row untouched
+            # Content differs: prefer the newer edit. Ties go to the caller's
+            # copy (it is the one performing a real change right now).
+            current_ts = current.get("updated_at") or ""
+            incoming_ts = row.get("updated_at") or ""
+            if incoming_ts >= current_ts:
+                row["updated_at"] = _now_iso()
+                position = next(i for i, item in enumerate(merged) if item is current)
+                merged[position] = row
+                merged_by_id[key] = row
+        payload = merged
+
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     temporary.replace(destination)

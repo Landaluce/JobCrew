@@ -12,6 +12,7 @@ output/*.csv
 output/*.txt
 output/*.pdf
 output/*.png
+output/tailored_resumes/
 
 # Local config overrides and secrets
 config.local.yaml

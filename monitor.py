@@ -5,8 +5,42 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from job_automation import ApplicationHistory
+
+
+def _event_time(event: dict[str, Any]) -> datetime | None:
+    timestamp = event.get("timestamp", event.get("created_at", ""))
+    try:
+        when = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when
+    except (AttributeError, ValueError):
+        return None
+
+
+def submitted_summary(records: list[dict[str, Any]], now: datetime | None = None) -> list[str]:
+    """Human-readable lines for submitted applications with their age in days."""
+    reference = now or datetime.now(timezone.utc)
+    submitted = [r for r in records if r.get("status") == "submitted"]
+    if not submitted:
+        return []
+
+    lines = [f"Submitted applications ({len(submitted)}):"]
+    for event in submitted:
+        job = event.get("job", event)
+        company = job.get("company", "Unknown")
+        title = job.get("title", "Untitled")
+        timestamp = event.get("timestamp", event.get("created_at", ""))
+        when = _event_time(event)
+        if when is None:
+            days_str = "unknown age"
+        else:
+            days_str = f"{(reference - when).days} days ago"
+        lines.append(f"- {company} — {title} ({timestamp}) — {days_str}")
+    return lines
 
 
 def main() -> None:
@@ -15,28 +49,11 @@ def main() -> None:
     args = parser.parse_args()
 
     history = ApplicationHistory(Path(args.history))
-    records = history.records()
-
-    submitted = [r for r in records if r.get("status") == "submitted"]
-
-    if not submitted:
+    lines = submitted_summary(history.records())
+    if lines:
+        print("\n".join(lines))
+    else:
         print("No submitted applications found.")
-        return
-
-    now = datetime.now(timezone.utc)
-    print(f"Submitted applications ({len(submitted)}):")
-    for event in submitted:
-        job = event.get("job", event)
-        company = job.get("company", "Unknown")
-        title = job.get("title", "Untitled")
-        timestamp = event.get("timestamp", event.get("created_at", ""))
-        try:
-            when = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            days = (now - when).days
-            days_str = f"{days} days ago"
-        except (TypeError, ValueError, AttributeError):
-            days_str = "unknown age"
-        print(f"- {company} — {title} ({timestamp}) — {days_str}")
 
 
 if __name__ == "__main__":

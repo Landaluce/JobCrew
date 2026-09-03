@@ -105,15 +105,29 @@ def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> Non
                 st.rerun()
 
             with st.expander("Cover letter", expanded=bool(package.get("cover_letter"))):
-                if package.get("cover_letter"):
-                    st.write(package["cover_letter"])
-                else:
+                if not package.get("cover_letter"):
                     st.caption("No cover letter yet.")
+                cover_letter = st.text_area(
+                    "Cover letter (editable)",
+                    value=package.get("cover_letter", ""),
+                    height=200,
+                    key=f"ready-cover-letter-{package['job_id'][:12]}",
+                    help="Edit the cover letter freely; changes save automatically",
+                )
+                if cover_letter != package.get("cover_letter", ""):
+                    package["cover_letter"] = cover_letter
+                    common.write_packages(packages)
+                    st.rerun()
+                if package.get("status") == "approved":
+                    generate_label = (
+                        "Regenerate cover letter" if package.get("cover_letter")
+                        else "Generate cover letter"
+                    )
                     if st.button(
-                        "Generate cover letter",
+                        generate_label,
                         key=f"ready-gen-cover-{idx}",
                         icon=":material/auto_awesome:",
-                        help="Generate a tailored cover letter",
+                        help="Rewrite the cover letter with the LLM (you can keep editing it afterwards)",
                     ):
                         with st.spinner("Generating cover letter…"):
                             success, output = common.run_project_command([
@@ -128,16 +142,21 @@ def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> Non
                 if tailored_resume:
                     st.caption(
                         f"Also saved to `output/tailored_resumes/{package['job_id']}.txt`. "
-                        "The original resume file is still what gets uploaded by default — "
-                        "copy this text into a new file if you want the browser flow to use it."
+                        "Once kept, this tailored resume is rendered to a PDF and the browser "
+                        "flow uploads it instead of the original resume file."
                     )
                 else:
                     st.caption(
                         "No tailored resume yet. Generate bullet points and a summary "
                         "aligned with this posting (human review required before use)."
                     )
+                if package.get("status") == "approved":
+                    resume_generate_label = (
+                        "Regenerate tailored resume" if tailored_resume
+                        else "Generate tailored resume"
+                    )
                     if st.button(
-                        "Generate tailored resume",
+                        resume_generate_label,
                         key=f"ready-gen-resume-{idx}",
                         icon=":material/auto_awesome:",
                         help="Rewrite resume bullets around this job posting for review",
@@ -233,6 +252,6 @@ def _write_tailored_file(package: dict[str, Any]) -> None:
     header = (
         f"# Tailored resume — {job.get('title', 'Untitled')} at {job.get('company', 'Unknown')}\n"
         f"# Job: {job.get('url', '')}\n"
-        "# Review before using. The original resume file is still what gets uploaded by default.\n\n"
+        "# Review before using. Once generated, this tailored resume (as a PDF) is what gets uploaded.\n\n"
     )
     destination.write_text(header + (package.get("tailored_resume") or ""), encoding="utf-8")

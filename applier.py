@@ -29,12 +29,15 @@ def apply_with_playwright(
     cover_letter: str,
     auto_submit: bool = False,
     review_mode: bool = True,
+    resume_kind: str = "original",
     verbose: bool = False,
 ) -> dict[str, Any]:
     if not PLAYWRIGHT_AVAILABLE:
         raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install")
 
-    details: dict[str, Any] = {"site": "unknown", "steps": [], "submitted": False}
+    details: dict[str, Any] = {
+        "site": "unknown", "steps": [], "submitted": False, "resume": resume_kind,
+    }
     pick_handler: Any = None
     try:
         from playwright_sites import pick_handler as _site_pick_handler

@@ -17,6 +17,21 @@ ATTENTION_REASON_MAP = {
     "error": "Automation failed — review and retry or complete manually",
 }
 
+# Applications older than this (no response logged) deserve a nudge.
+FOLLOWUP_AFTER_DAYS = 7
+# Any later event with one of these statuses counts as "responded" and stops the nudge.
+RESPONSE_STATUSES = {"interview", "offer", "rejected", "withdrawn", "follow-up"}
+
+
+def _parse_time(value: Any) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when
+    except (AttributeError, ValueError):
+        return None
+
 
 def _score(value: Any) -> Any:
     return value if isinstance(value, (int, float)) else None
@@ -59,13 +74,7 @@ def submitted_rows(history: list[dict[str, Any]], now: datetime | None = None) -
             continue
         job = event.get("job", event)
         timestamp = event.get("timestamp", event.get("created_at", ""))
-        when = None
-        try:
-            when = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-            if when is not None and when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
-        except (ValueError, AttributeError):
-            when = None
+        when = _parse_time(timestamp)
         age_days = (reference - when).days if when else None
         rows.append({
             "company": job.get("company", "Unknown"),
@@ -76,6 +85,58 @@ def submitted_rows(history: list[dict[str, Any]], now: datetime | None = None) -
             "days_since_submission": age_days,
             "url": job.get("url", ""),
         })
+    return rows
+
+
+def followup_rows(history: list[dict[str, Any]], now: datetime | None = None) -> list[dict[str, Any]]:
+    """Submitted applications that are old enough to nudge and have no response yet.
+
+    Uses each job's most recent submission as the anchor, then looks for any
+    later event with a response status (interview, offer, rejection, withdrawal,
+    or a logged follow-up). Oldest submissions first — those need attention most.
+    """
+    reference = now or datetime.now(timezone.utc)
+    events_by_job: dict[str, list[dict[str, Any]]] = {}
+    for event in history:
+        jid = job_id(event.get("job", event))
+        events_by_job.setdefault(jid, []).append(event)
+
+    rows: list[dict[str, Any]] = []
+    for jid, events in events_by_job.items():
+        submitted_events = [e for e in events if e.get("status") == "submitted"]
+        if not submitted_events:
+            continue
+        latest = max(
+            submitted_events,
+            key=lambda e: _parse_time(e.get("timestamp", e.get("created_at", ""))) or reference,
+        )
+        submitted_when = _parse_time(latest.get("timestamp", latest.get("created_at", "")))
+        if submitted_when is None:
+            continue
+        age_days = (reference - submitted_when).days
+        if age_days < FOLLOWUP_AFTER_DAYS:
+            continue
+        responded = any(
+            e.get("status") in RESPONSE_STATUSES
+            and (_parse_time(e.get("timestamp", e.get("created_at", ""))) or submitted_when)
+            >= submitted_when
+            for e in events
+            if e is not latest
+        )
+        if responded:
+            continue
+        job = latest.get("job", latest)
+        rows.append({
+            "company": job.get("company", "Unknown"),
+            "title": job.get("title", "Untitled"),
+            "score": _score(job.get("score")),
+            "url": job.get("url", ""),
+            "job_id": jid,
+            "submitted_at": latest.get("timestamp", latest.get("created_at", "")),
+            "days_since_submission": age_days,
+            "job": job,
+        })
+    rows.sort(key=lambda row: row["days_since_submission"], reverse=True)
     return rows
 
 

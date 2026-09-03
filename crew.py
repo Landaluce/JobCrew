@@ -19,7 +19,9 @@ from job_automation import (
     recover_jobs_from_text,
 )
 from job_automation.listings import MAX_LISTING_PAGES, MAX_PAGES_PER_DOMAIN
+from job_automation.llm import llm_server_online
 from job_automation.packages import load_packages, save_packages
+from job_automation.resume_render import render_resume_pdf, tailored_pdf_path
 
 # crewai/pydantic are heavy and must stay optional at import time: the CLI
 # (help text, apply-only runs, dashboard launches) must work even when they
@@ -406,9 +408,9 @@ def generate_cover_for_saved_package(package_id: str, resume_text: str, verbose:
 def generate_resume_for_saved_package(package_id: str, resume_text: str, verbose: bool = False) -> Path:
     """Generate a per-job tailored resume for an approved package.
 
-    The tailored text is stored on the package (``tailored_resume``) and also
-    written to ``output/tailored_resumes/<job_id>.txt`` so the human reviewer
-    can open, edit, and upload it next to the original resume file.
+    The tailored text is stored on the package (``tailored_resume``), written
+    to ``output/tailored_resumes/<job_id>.txt`` for review, and rendered to a
+    PDF that the apply flow uploads in place of the original resume file.
     """
     packages = load_packages(PACKAGES_JSON)
     package = _approved_package(packages, package_id, "tailored resume")
@@ -422,7 +424,7 @@ def generate_resume_for_saved_package(package_id: str, resume_text: str, verbose
     header = (
         f"# Tailored resume — {job.get('title', 'Untitled')} at {job.get('company', 'Unknown')}\n"
         f"# Job: {job.get('url', '')}\n"
-        "# Review before using. The original resume file is still what gets uploaded by default.\n\n"
+        "# Review before using. Once generated, this tailored resume (as a PDF) is what gets uploaded.\n\n"
     )
     destination.write_text(header + package["tailored_resume"], encoding="utf-8")
     log_success(f"Tailored resume saved to {destination}.", verbose)
@@ -695,6 +697,16 @@ def main():
     log_success(f"Resume source: {resume_profile.source_file}", args.verbose)
     log_success(f"Resume SHA-256: {resume_profile.source_hash}", args.verbose)
 
+    # Fail fast when the LLM server is down instead of burning minutes in a
+    # CrewAI kickoff that dies with a connection error. Apply-only runs and
+    # --add-package (scoring degrades gracefully) still work offline.
+    if not args.dry_run and (
+        args.generate_cover or args.generate_resume or args.search
+    ) and not llm_server_online():
+        log_error("The LLM server (Ollama) is not reachable.")
+        log_error("Check OLLAMA_BASE_URL in .env and start Ollama with: ollama serve")
+        raise SystemExit(1)
+
     if args.dry_run:
         log_warning("DRY RUN MODE - No changes will be made", args.verbose)
 
@@ -906,13 +918,35 @@ def main():
                 if args.dry_run:
                     log_info(f"Would apply to: {job.get('title')} @ {job.get('company')}", args.verbose)
                     continue
+                resume_kind = "original"
+                upload_path = package.get("resume_path") or args.resume
+                if (package.get("tailored_resume") or "").strip():
+                    # A reviewed tailored resume replaces the original file for
+                    # this run; the PDF is re-rendered fresh so manual edits in
+                    # the dashboard are always what gets uploaded.
+                    try:
+                        tailored_path = tailored_pdf_path(str(package.get("job_id")))
+                        render_resume_pdf(package["tailored_resume"], tailored_path)
+                        upload_path = str(tailored_path)
+                        resume_kind = "tailored"
+                        log_info(
+                            f"Uploading tailored resume for {job.get('company', 'Unknown')} "
+                            f"(PDF: {tailored_path})",
+                            args.verbose,
+                        )
+                    except Exception as exc:
+                        log_warning(
+                            f"Could not render tailored resume ({exc}) — using the original file.",
+                            args.verbose,
+                        )
                 try:
                     result = apply_with_playwright(
                         job,
-                        package.get("resume_path") or args.resume,
+                        upload_path,
                         package["cover_letter"],
                         auto_submit=args.auto_submit,
                         review_mode=args.review,
+                        resume_kind=resume_kind,
                         verbose=args.verbose,
                     )
                     applied += 1
@@ -921,6 +955,9 @@ def main():
                         target = by_job_id.get(package.get("job_id"))
                         if target is not None:
                             target["status"] = final_status
+                            target["updated_at"] = (
+                                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                            )
                             changed = True
                 except Exception as exc:
                     # One broken application must not abort the remaining batch;
@@ -934,7 +971,9 @@ def main():
                     args.verbose,
                 )
         if changed:
-            save_packages(packages_all, PACKAGES_JSON)
+            # Merge so concurrent dashboard edits to other packages survive;
+            # per-row last-writer-wins is decided by updated_at.
+            save_packages(packages_all, PACKAGES_JSON, merge_existing=True)
         if args.playwright and not args.dry_run:
             skipped = len(approved) - applied - failed
             log_info(f"Apply run complete: {applied} processed, {failed} failed, {skipped} skipped.")

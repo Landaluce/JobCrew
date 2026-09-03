@@ -2,7 +2,14 @@
 
 from datetime import datetime, timezone
 
-from dashboard_app.rows import attention_rows, funnel_counts, history_table_rows, submitted_rows
+from dashboard_app.rows import (
+    FOLLOWUP_AFTER_DAYS,
+    attention_rows,
+    followup_rows,
+    funnel_counts,
+    history_table_rows,
+    submitted_rows,
+)
 
 NOW = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -85,3 +92,60 @@ def test_funnel_counts() -> None:
         "submitted": 1,
         "history_events": 2,
     }
+
+
+def _days_ago(n: int) -> str:
+    from datetime import timedelta
+
+    return (NOW - timedelta(days=n)).isoformat().replace("+00:00", "Z")
+
+
+def test_followup_rows_old_enough_and_no_response() -> None:
+    history = [_event("submitted", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS + 2))]
+    rows = followup_rows(history, now=NOW)
+    assert len(rows) == 1
+    assert rows[0]["company"] == "Acme"
+    assert rows[0]["days_since_submission"] == FOLLOWUP_AFTER_DAYS + 2
+
+
+def test_followup_rows_skips_recent_submissions() -> None:
+    history = [_event("submitted", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS - 3))]
+    assert followup_rows(history, now=NOW) == []
+
+
+def test_followup_rows_stops_after_response_event() -> None:
+    history = [
+        _event("submitted", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS + 5)),
+        _event("interview", JOB_A, _days_ago(1)),
+    ]
+    assert followup_rows(history, now=NOW) == []
+
+
+def test_followup_rows_stops_after_logged_followup() -> None:
+    history = [
+        _event("submitted", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS + 5)),
+        _event("follow-up", JOB_A, _days_ago(2)),
+    ]
+    assert followup_rows(history, now=NOW) == []
+
+
+def test_followup_rows_ignores_response_before_submission() -> None:
+    history = [
+        _event("rejected", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS + 20)),
+        _event("submitted", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS + 5)),
+    ]
+    rows = followup_rows(history, now=NOW)
+    assert len(rows) == 1  # the rejection predates the submission
+
+
+def test_followup_rows_oldest_first_and_one_row_per_job() -> None:
+    history = [
+        _event("submitted", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS + 12)),
+        _event("submitted", JOB_B, _days_ago(FOLLOWUP_AFTER_DAYS + 1)),
+        _event("submitted", JOB_A, _days_ago(FOLLOWUP_AFTER_DAYS + 2)),  # re-run resets age
+    ]
+    rows = followup_rows(history, now=NOW)
+    assert len(rows) == 2
+    assert rows[0]["company"] == "Acme"  # oldest first
+    acme_age = next(r["days_since_submission"] for r in rows if r["company"] == "Acme")
+    assert acme_age == FOLLOWUP_AFTER_DAYS + 2  # anchored on the most recent submission

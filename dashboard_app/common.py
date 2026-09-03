@@ -181,9 +181,22 @@ def inject_keyboard_shortcuts() -> None:
     """, unsafe_allow_javascript=True)
 
 
-def write_packages(packages: list[dict[str, Any]]) -> None:
-    """Persist packages and drop the Streamlit cache for the next read."""
-    save_packages(packages, PACKAGES_PATH)
+def write_packages(
+    packages: list[dict[str, Any]],
+    removed_ids: list[str] | None = None,
+) -> None:
+    """Persist packages and drop the Streamlit cache for the next read.
+
+    Saves in merge mode so a concurrent crew.py write (search, apply run) is
+    not clobbered: unchanged rows are kept as-is, changed rows resolve
+    last-writer-wins, and rows created by the other writer survive. Pass
+    ``removed_ids`` for intentional deletions (e.g. dedupe merges).
+    """
+    save_packages(
+        packages, PACKAGES_PATH,
+        merge_existing=True,
+        removed_ids=removed_ids or (),
+    )
     load_package_rows.clear()
 
 

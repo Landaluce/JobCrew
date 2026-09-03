@@ -45,7 +45,10 @@ def render(history: list[dict[str, Any]], packages: list[dict[str, Any]]) -> Non
             help="Keep the most advanced copy of each job and remove the rest",
         ):
             merged, removed = dedupe_packages(packages)
-            common.write_packages(merged)
+            common.write_packages(
+                merged,
+                removed_ids=[str(package.get("job_id") or "") for package in removed],
+            )
             st.success(f"Merged {len(removed)} duplicate package(s). The richest copy of each job was kept.")
             st.rerun()
 

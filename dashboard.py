@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from dashboard_app import common, rows
+from dashboard_app import common, health, rows
 from dashboard_app.common import (
     CONFIG,
     HISTORY_PATH,
@@ -46,6 +46,8 @@ st.title("Job application workspace")
 st.caption("Review packages before applying, then track the application funnel in one place.")
 
 with st.sidebar:
+    health.render_health_panel()
+    st.divider()
     st.subheader("Settings")
     st.session_state.auto_refresh = st.checkbox(
         "Auto-refresh",
